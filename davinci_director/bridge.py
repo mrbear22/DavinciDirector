@@ -205,7 +205,7 @@ class _MockTimeline:
         self.start_frame = int(round(3600 * fps)) if start_frame is None else start_frame
         self.items = []
         self.markers = {}
-        self.tc_frame = start_frame
+        self.tc_frame = self.start_frame
 
     def GetName(self): return self.name
     def SetName(self, n): self.name = n; return True

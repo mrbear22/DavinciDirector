@@ -436,8 +436,10 @@ class App:
                 self.claude.chat(p, text, emit=emit, on_variant=on_variant)
             except Exception:
                 p.data["chat"].append({"role": "error", "text": "Помилка запиту до Claude.", "ts": time.time()})
+                self.changed(edit=False, full=True)
                 raise
             self.changed(edit=False, full=True)
+            self.job_update(job, status="done", progress=1.0, message="")
 
         return self.start_job("chat", "Чат з Claude", run)
 
@@ -541,6 +543,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(e), "resolve": True}, 502)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                self._json({"error": str(e)}, 500)
+            except OSError:
+                pass
 
     def _state(self):
         app = self.app

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DaVinci Director</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <!-- ============================================================ header -->
+  <header id="topbar">
+    <div class="brand"><span class="logo">◆</span> DaVinci Director</div>
+    <div class="crumbs" id="crumbs"><span class="dim">Не підключено</span></div>
+    <div class="tb-group">
+      <button id="btn-connect" class="tb" title="Перечитати поточний таймлайн Resolve">⟲ Таймлайн</button>
+      <button id="btn-transcribe" class="tb">🎙 Транскрибувати</button>
+    </div>
+    <div class="tb-group">
+      <button id="btn-undo" class="tb icon" title="Скасувати (Ctrl+Z)">↶</button>
+      <button id="btn-redo" class="tb icon" title="Повторити (Ctrl+Shift+Z)">↷</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="tb-group">
+      <label class="tb check" title="Автоматично оновлювати монтажний таймлайн після кожної зміни"><input type="checkbox" id="chk-autosync"> Автосинхр.</label>
+      <button id="btn-sync" class="tb" title="Створити / оновити монтажний таймлайн у DaVinci Resolve">▸ На таймлайн Resolve</button>
+    </div>
+    <button id="btn-analyze" class="tb accent" title="Передати транскрипцію Claude для пошуку сюжетів">✦ Знайти сюжети з Claude</button>
+    <button id="btn-settings" class="tb icon" title="Налаштування">⚙</button>
+  </header>
+
+  <!-- ============================================================ main -->
+  <main id="main">
+    <!-- left column -->
+    <section id="left" class="col">
+      <div class="panel viewer-panel">
+        <div class="panel-title"><span>В'ювер</span>
+          <div class="pt-tools">
+            <label class="mini check" title="Відтворювати в порядку монтажу, пропускаючи вирізане"><input type="checkbox" id="chk-playedit" checked> Монтаж</label>
+          </div>
+        </div>
+        <div class="viewer">
+          <video id="video" preload="metadata" playsinline></video>
+          <div id="viewer-msg" class="viewer-msg hidden"></div>
+        </div>
+        <div class="transport">
+          <button id="v-prev" class="tbtn" title="Попередній фрагмент">⏮</button>
+          <button id="v-play" class="tbtn" title="Відтворення (Пробіл)">▶</button>
+          <button id="v-next" class="tbtn" title="Наступний фрагмент">⏭</button>
+          <div class="tc-box"><div id="tc-src" class="tc" title="Час в оригіналі">00:00:00.0</div><div id="tc-edit" class="tc dim" title="Час у монтажі">00:00:00.0</div></div>
+          <label class="mini check" title="Клік по слову переміщує плейхед у Resolve"><input type="checkbox" id="chk-clickjump" checked> → Resolve</label>
+          <label class="mini check" title="Підсвічувати слово під плейхедом Resolve"><input type="checkbox" id="chk-follow" checked> Слідкувати</label>
+        </div>
+      </div>
+      <div class="panel grow">
+        <div class="tabs" data-tabs="left">
+          <button class="tab active" data-tab="speakers">Мовці</button>
+          <button class="tab" data-tab="outline">Фрагменти</button>
+          <button class="tab" data-tab="search">Пошук</button>
+        </div>
+        <div class="tab-body active" data-body="speakers">
+          <div id="speakers" class="list"></div>
+          <div class="list-foot"><button id="btn-add-speaker" class="btn sm">＋ Мовець</button><span class="dim small">Подвійний клік — перейменувати</span></div>
+        </div>
+        <div class="tab-body" data-body="outline"><div id="outline" class="list"></div></div>
+        <div class="tab-body" data-body="search">
+          <div class="search-head">
+            <input id="search-input2" class="inp" placeholder="Слово або фраза…">
+          </div>
+          <div id="search-summary" class="small dim pad"></div>
+          <div id="search-results" class="list"></div>
+          <div class="list-foot"><button id="btn-cut-matches" class="btn sm" disabled>Вирізати всі збіги</button><button id="btn-restore-matches" class="btn sm" disabled>Відновити</button></div>
+        </div>
+      </div>
+    </section>
+    <div class="splitter" data-split="left"></div>
+
+    <!-- center column -->
+    <section id="center" class="col">
+      <div class="panel grow">
+        <div class="panel-title editor-title">
+          <span>Транскрипція / текстовий монтаж</span>
+          <div class="pt-tools">
+            <div class="searchbox"><input id="search-input" class="inp sm" placeholder="Пошук (Ctrl+F)"><span id="search-count" class="dim small"></span><button id="search-prev" class="tbtn sm">‹</button><button id="search-next" class="tbtn sm">›</button></div>
+            <div class="dropdown">
+              <button class="btn sm" data-dd>Вигляд ▾</button>
+              <div class="dd-menu">
+                <label><input type="checkbox" id="opt-showcut" checked> Показувати вирізане</label>
+                <label><input type="checkbox" id="opt-gaps" checked> Показувати паузи</label>
+                <label><input type="checkbox" id="opt-times" checked> Таймкоди фрагментів</label>
+                <label><input type="checkbox" id="opt-conf" checked> Підсвічувати сумнівні слова</label>
+              </div>
+            </div>
+            <div class="dropdown">
+              <button class="btn sm" data-dd>Інструменти ▾</button>
+              <div class="dd-menu">
+                <button data-cmd="remove-pauses">Скоротити паузи довші за 2 с</button>
+                <button data-cmd="remove-pauses-5">Скоротити паузи довші за 5 с</button>
+                <button data-cmd="cut-fillers">Вирізати слова-паразити…</button>
+                <hr>
+                <button data-cmd="export-srt">Експорт субтитрів монтажу (SRT)</button>
+                <button data-cmd="export-txt">Експорт тексту монтажу (TXT)</button>
+                <button data-cmd="export-edl">Експорт EDL (резерв)</button>
+                <button data-cmd="export-src-srt">Експорт субтитрів оригіналу (SRT)</button>
+                <hr>
+                <button data-cmd="reset-edit" class="danger">Скинути монтаж до оригіналу</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="editor-wrap">
+          <div id="editor" tabindex="0" spellcheck="false"></div>
+          <div id="editor-empty" class="empty">
+            <div class="empty-inner">
+              <div class="empty-icon">◆</div>
+              <div id="empty-text">Додайте відеозапис стріму на таймлайн DaVinci Resolve, відкрийте аддон і запустіть транскрибування.</div>
+              <button id="btn-empty-transcribe" class="btn primary">🎙 Транскрибувати таймлайн</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <div class="splitter" data-split="right"></div>
+
+    <!-- right column -->
+    <section id="right" class="col">
+      <div class="panel grow">
+        <div class="tabs" data-tabs="right">
+          <button class="tab active" data-tab="stories">Сюжети</button>
+          <button class="tab" data-tab="chat">Claude <span id="chat-badge" class="badge hidden">•</span></button>
+          <button class="tab" data-tab="moments">Моменти</button>
+        </div>
+        <div class="tab-body active" data-body="stories"><div id="stories" class="scroll"></div></div>
+        <div class="tab-body chat-body" data-body="chat">
+          <div id="chat-log" class="scroll"></div>
+          <div class="chat-quick" id="chat-quick"></div>
+          <div class="chat-input">
+            <textarea id="chat-text" class="inp" rows="3" placeholder="Попросіть Claude: знайти кращий початок, скоротити частину, написати закадровий текст… (Ctrl+Enter)"></textarea>
+            <div class="chat-actions"><button id="chat-clear" class="btn sm ghost" title="Очистити розмову">Очистити</button><button id="chat-send" class="btn primary sm">Надіслати</button></div>
+          </div>
+        </div>
+        <div class="tab-body" data-body="moments"><div id="moments" class="scroll"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================================================ overview -->
+  <div id="overview">
+    <div class="ov-label"><div id="ov-dur-edit" class="tc">00:00</div><div id="ov-dur-src" class="small dim">з 00:00</div></div>
+    <canvas id="ov-canvas"></canvas>
+  </div>
+
+  <!-- ============================================================ status -->
+  <footer id="statusbar">
+    <div id="status-msg" class="grow"></div>
+    <div id="jobs"></div>
+    <div id="sync-state" class="sb-item"></div>
+    <div id="resolve-state" class="sb-item"></div>
+  </footer>
+</div>
+
+<!-- ============================================================ overlays -->
+<div id="ctxmenu" class="ctxmenu hidden"></div>
+<div id="toasts"></div>
+<div id="modal-back" class="hidden"><div id="modal" class="modal"></div></div>
+<input id="word-editor" class="word-editor hidden">
+
+<script src="app.js"></script>
+</body>
+</html>

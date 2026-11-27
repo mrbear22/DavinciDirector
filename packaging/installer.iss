@@ -24,8 +24,8 @@ AppVersion={#AppVersion}
 AppVerName=DaVinci Director {#AppVersion}
 AppPublisher=DaVinci Director
 ; the user picks the folder; by default next to DaVinci Resolve's user files.  An upgrade keeps the folder
-; chosen before (except the pre-2.6 location, see InitializeWizard).  Everything the program downloads or
-; keeps goes into the chosen folder, so it can be anywhere with enough space (several GB).
+; chosen before.  Everything the program downloads or keeps goes into the chosen folder, so it can be
+; anywhere with enough space (several GB).
 DefaultDirName={userappdata}\Blackmagic Design\DaVinci Resolve\Support\DaVinci Director
 UsePreviousAppDir=yes
 DisableDirPage=no
@@ -52,8 +52,6 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs c
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\app"
-; versions up to 2.5 lived in %LOCALAPPDATA%\Programs; the program moves their data over on first start
-Type: filesandordirs; Name: "{localappdata}\Programs\DaVinci Director"; Check: OldLocationIsElsewhere
 
 [Registry]
 ; hidden watcher at login: opens the panel when Workspace > Scripts > DaVinci Director runs in Resolve
@@ -80,8 +78,7 @@ Type: filesandordirs; Name: "{app}\data\cache"
 uk.FinishedLabel=DaVinci Director встановлено.%n%nВідкрийте DaVinci Resolve і виберіть у меню Workspace > Scripts > DaVinci Director.%n(Якщо Resolve вже відкритий і пункту немає — перезапустіть Resolve.)
 
 [Code]
-// a running copy (hidden watcher / open panel) locks its files: ask it to quit first —
-// the copy in this folder and one from the old location (%LOCALAPPDATA%\Programs, up to 2.5)
+// a running copy (hidden watcher / open panel) locks its files: ask it to quit first
 procedure QuitCopy(Dir: String);
 var
   Code: Integer;
@@ -90,29 +87,13 @@ begin
     Exec(Dir + '\python\pythonw.exe', '"' + Dir + '\app\dd_entry.py" --quit', Dir + '\app', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-function OldLocation(): String;
-begin
-  Result := ExpandConstant('{localappdata}\Programs\DaVinci Director');
-end;
-
-// do not offer the pre-2.6 folder again on an upgrade: offer the default (Resolve's folder) instead
-procedure InitializeWizard();
-begin
-  if CompareText(RemoveBackslashUnlessRoot(WizardForm.DirEdit.Text), OldLocation()) = 0 then
-    WizardForm.DirEdit.Text := ExpandConstant('{userappdata}\Blackmagic Design\DaVinci Resolve\Support\DaVinci Director');
-end;
-
-function OldLocationIsElsewhere(): Boolean;
-begin
-  Result := CompareText(RemoveBackslashUnlessRoot(ExpandConstant('{app}')), OldLocation()) <> 0;
-end;
-
 function HasForeignFiles(Dir: String): Boolean;
 var
   F: TFindRec;
 begin
   Result := False;
-  if FileExists(Dir + '\app\dd_entry.py') then Exit;  // our own folder (upgrade)
+  // our own folder (an upgrade, or a repair after an interrupted one: then app\ may be gone)
+  if FileExists(Dir + '\app\dd_entry.py') or FileExists(Dir + '\python\pythonw.exe') or DirExists(Dir + '\data') then Exit;
   if FindFirst(Dir + '\*', F) then
   try
     repeat
@@ -155,7 +136,6 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   QuitCopy(ExpandConstant('{app}'));
-  QuitCopy(OldLocation());
   Result := '';
 end;
 

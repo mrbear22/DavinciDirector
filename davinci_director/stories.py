@@ -16,31 +16,39 @@ import re
 import time
 import uuid
 
-from .engine import EditError
+from .engine import EditError, content_sig
+from .link import LinkError
 
 TRANSCRIPT_FORMAT = "davinci-director.transcript/1"
 STORIES_FORMAT = "davinci-director.stories/1"
 
-ROLES = ["hook", "setup", "context", "rising", "conflict", "turn", "climax", "resolution", "payoff",
-         "outro", "cta", "bridge", "montage", "other"]
-ROLE_COLORS = {"hook": "Red", "setup": "Blue", "context": "Cyan", "rising": "Green", "conflict": "Purple",
-               "turn": "Fuchsia", "climax": "Rose", "resolution": "Sky", "payoff": "Mint", "outro": "Lavender",
-               "cta": "Sand", "bridge": "Cream", "montage": "Lemon", "other": "Blue"}
+# What a scene does for the viewer.  The first five are what the prompt offers; the rest are kept so that
+# answers in the older, dramatic vocabulary still import.
+ROLES = ["hook", "context", "main", "payoff", "outro",
+         "setup", "rising", "conflict", "turn", "climax", "resolution", "cta", "bridge", "montage", "other"]
+ROLE_COLORS = {"hook": "Red", "context": "Cyan", "main": "Green", "payoff": "Mint", "outro": "Lavender",
+               "setup": "Blue", "rising": "Green", "conflict": "Purple", "turn": "Fuchsia", "climax": "Rose",
+               "resolution": "Sky", "cta": "Sand", "bridge": "Cream", "montage": "Lemon", "other": "Blue"}
 
 # Only what the app reads back.  Kept small: every field here is something the model will fill in.
 ANSWER_SCHEMA = {
     "format": STORIES_FORMAT,
+    "verdict": "Чесна оцінка матеріалу: чи є з чого зробити окреме відео і що в ньому найсильніше (1–2 речення)",
     "stories": [{
-        "title": "Назва варіанта",
-        "logline": "Про що відео, одним реченням",
-        "duration_sec": 600,
+        "title": "Робоча назва відео",
+        "concept": "Центральна ідея: що це за відео, одним реченням",
+        "why_watch": "Чому це дивитиметься людина, яка не знає автора, не бачила стрім і не грає в цю гру",
+        "structure": "Як побудоване відео і чому в такому порядку (1–2 речення)",
+        "risks": "Слабкі місця концепції; моменти, які без картинки можуть бути незрозумілі",
+        "duration_sec": 420,
         "scenes": [{
             "title": "Назва сцени",
-            "role": "hook | setup | rising | conflict | turn | climax | resolution | payoff | outro",
+            "role": "hook | context | main | payoff | outro",
             "fragments": ["A12-A15", "A40"],
-            "summary": "Що відбувається",
-            "edit_notes": "Що прибрати, де різати (необов'язково)",
-            "voiceover": "Закадровий текст, лише якщо без нього незрозуміло; інакше null"
+            "summary": "Що відбувається (лише те, що є в матеріалі)",
+            "edit_notes": "Що прибрати, де різати; null, якщо нічого",
+            "visual": "Що має бути видно на екрані, щоб момент працював, якщо з мови цього не зрозуміти; інакше null",
+            "voiceover": None
         }]
     }]
 }
@@ -49,8 +57,8 @@ BEATS_FORMAT = "davinci-director.beats/1"
 BEATS_SCHEMA = {
     "format": BEATS_FORMAT,
     "beats": [{"fragments": "A120-A134", "title": "Коротка назва", "summary": "Що відбувається",
-               "type": "funny | tense | drama | info | turn | epic | context", "strength": 4,
-               "quote": "найкраща цитата або порожньо"}]
+               "type": "funny | absurd | interaction | skill | mechanic | info | context",
+               "strength": 3, "quote": "найкраща цитата або порожньо"}]
 }
 
 # Budget per file for a chat: leaves room for the answer and the conversation in
@@ -66,14 +74,47 @@ DURATIONS = {
 }
 DEFAULT_BRIEF = {"duration": "medium", "min_sec": None, "max_sec": None, "variants": 3, "notes": ""}
 
+# How to look at a stream: the job of a YouTube editor, not of a screenwriter
+APPROACH = [
+    "ЯК ДИВИТИСЯ НА МАТЕРІАЛ",
+    "Ти — YouTube-редактор, а не сценарист. Запис стріму — це сировина; твоя робота — знайти в ній самостійне "
+    "відео, цікаве людині, яка вперше бачить цього автора. Не переказуй трансляцію, не вигадуй історію і не збирай "
+    "просто нарізку найсмішнішого.",
+    "- Спершу знайди центральну ідею — те, на чому тримається відео. Це не обов'язково проходження чи досягнення мети: "
+    "це може бути незвичайна ситуація, що розвивається протягом запису; взаємодія учасників; кумедний або абсурдний підхід "
+    "до гри; незвичайна механіка; кілька епізодів зі спільною темою — або щось інше, що видно саме в цьому матеріалі. "
+    "Ідея має спиратися на достатньо реальних фрагментів.",
+    "- Не нав'язуй драматургію. Зав'язка, конфлікт і кульмінація потрібні лише тоді, коли вони справді є в записі. "
+    "Здебільшого відео тримається на ідеї, відборі й темпі, а не на сюжетній арці.",
+    "- Дивись очима стороннього глядача: він не знає стрімера, не бачив трансляцію, не знає, що було раніше, і не "
+    "обов'язково цікавиться грою. Звичайна розмова друзів цікава їм самим, але не йому; бери взаємодію, яка зрозуміла "
+    "й розважальна сама по собі.",
+    "- Монтаж має бути практичним: відбір, порядок, темп, зрозумілість. Не вигадуй сцен і закадрових пояснень, не "
+    "пропонуй складних вставок і ефектів без потреби, не роби мем із кожного моменту, не розтягуй відео до тривалості "
+    "і не намагайся використати якомога більше фрагментів.",
+    "- Кілька варіантів — лише якщо в матеріалі справді є різні ідеї. Варіанти, що відрізняються лише порядком тих "
+    "самих фрагментів, не потрібні. Якщо ідея одна — дай один варіант.",
+    "- Не кожен стрім вартий окремого відео. Якщо матеріалу недостатньо, чесно скажи це у \"verdict\" і поверни "
+    "порожній список \"stories\". Коротке відео з однією сильною ідеєю краще за складну структуру з посереднього матеріалу.",
+]
+
 RULES = [
     "Посилайся на матеріал лише через id на початку рядка (\"A12\" або діапазон \"A12-A15\"). Таймкодів не вигадуй.",
     "Можна брати частину діапазону: з рядка \"A12-A15\" — \"A13-A14\". Кожен id — шматок у кілька секунд.",
-    "Порядок фрагментів у сцені і порядок сцен — це порядок у готовому відео. Хронологію можна змінювати.",
-    "Тривалість варіанта — сума тривалостей вибраних фрагментів (у дужках біля кожного рядка). Тримайся заданої тривалості.",
-    "Бери лише те, що справді є в матеріалі. Закадровий текст — лише там, де без нього глядач не зрозуміє.",
-    "«(пауза N с)» — довгий відрізок без мови; на стрімі це зазвичай геймплей, його можна брати як дію.",
+    "Порядок фрагментів у сцені і порядок сцен — це порядок у готовому відео. Хронологію можна змінювати, якщо так зрозуміліше.",
+    "Тривалість варіанта — сума тривалостей вибраних фрагментів (у дужках біля кожного рядка). Задана тривалість — "
+    "верхня межа, а не мета: якщо сильного матеріалу менше, відео коротше.",
+    "Не вигадуй реплік, подій, реакцій чи обставин, яких немає в тексті. Що відбувається на екрані, з транскрипції не видно: "
+    "якщо момент без картинки незрозумілий, напиши це у \"visual\", а не здогадуйся.",
+    "«(пауза N с)» — довгий відрізок без мови; на стрімі це зазвичай геймплей. Брати його можна, але що там видно — невідомо.",
+    "Закадровий текст (\"voiceover\") — null, за винятком місць, де без одного короткого речення глядач справді загубиться.",
 ]
+
+
+BEATS_RULES = RULES[:2] + [
+    "Не вигадуй реплік, подій, реакцій чи обставин, яких немає в тексті. Що відбувається на екрані, з транскрипції не видно: "
+    "якщо момент без картинки незрозумілий, так і напиши в \"summary\", а не здогадуйся.",
+    RULES[5]]
 
 
 def get_brief(engine):
@@ -123,9 +164,10 @@ def _brief_lines(brief, what):
     lo, hi, label = brief_range(brief)
     n = brief.get("variants") or 1
     lines = ["ЗАВДАННЯ",
-             "Ти — сценарист і монтажер. %s" % what,
-             "- Варіантів: %d%s." % (n, " (різні історії або різні підходи до матеріалу)" if n > 1 else ""),
-             "- Тривалість кожного варіанта: %s — %s–%s." % (label, _len_text(lo), _len_text(hi))]
+             what,
+             "- Варіантів: до %d — лише справді різні ідеї; якщо в матеріалі одна, то один; якщо жодної, то жодного." % n
+             if n > 1 else "- Варіант: один, найсильніший (або жодного, якщо матеріалу недостатньо).",
+             "- Тривалість: %s, не довше %s (орієнтир %s–%s)." % (label, _len_text(hi), _len_text(lo), _len_text(hi))]
     notes = (brief.get("notes") or "").strip()
     if notes:
         lines += ["- Побажання автора (найважливіше):"] + ["  " + l for l in notes.splitlines() if l.strip()]
@@ -166,6 +208,52 @@ ROW_MAX_SEC = 35.0  # ... and so does a line getting this long (at the end of a 
 ROW_MAX_HARD = 50.0
 
 
+def _speaker_text(ws, names, multi, row):
+    """Text of one fragment with «Ім'я:» wherever the speaker changes (only when there are several)."""
+    parts, run = [], []
+    for w in ws:
+        sp = w[3] if w[3] < len(names) else 0
+        if multi and sp != row["sp"]:
+            if run:
+                parts.append(_join(run))
+                run = []
+            run.append("%s:" % names[sp])
+            row["sp"] = sp
+        run.append(w[2])
+    parts.append(_join(run))
+    return " ".join(p for p in parts if p)
+
+
+def _starts_row(row, ws, gap):
+    if row is None or gap >= ROW_PAUSE:
+        return True
+    length = ws[-1][1] - row["t0"]
+    return length > ROW_MAX_HARD or (length > ROW_MAX_SEC and bool(_SENT.search(row["text"][-1])))
+
+
+def _file_rows(engine, key, wanted):
+    """Lines of material of one file; ``wanted(k)`` says whether fragment k is included."""
+    tr = engine.transcripts[key]
+    names = [s["name"] for s in tr.speakers] or [""]
+    multi = len({w[3] for w in tr.words}) > 1
+    rows, row, prev_end = [], None, None
+    for k, (a, z) in enumerate(tr.frags):
+        ws = tr.words[a:z]
+        if not ws or not wanted(k):
+            continue
+        gap = ws[0][0] - prev_end if prev_end is not None else ws[0][0]
+        if _starts_row(row, ws, gap):
+            row = {"ids": [], "t0": ws[0][0], "t1": ws[-1][1], "text": [], "sp": None,
+                   "pause": gap if prev_end is not None else 0}
+            rows.append(row)
+        row["ids"].append(short_id(engine, key, k))
+        row["text"].append(_speaker_text(ws, names, multi, row))
+        row["t1"] = prev_end = ws[-1][1]
+    return [{"id": r["ids"][0] if len(r["ids"]) == 1 else "%s-%s" % (r["ids"][0], r["ids"][-1]),
+             "t0": r["t0"], "t1": r["t1"], "text": " ".join(r["text"]), "pause": r["pause"],
+             "file": engine.tags[key]} for r in rows]
+
+
 def material_rows(engine, only_timeline=False):
     """Lines of material: {"id", "t0", "t1", "text", "pause"}.  A line is a stretch of speech up to a long
     pause (or ~35 s); a change of speaker does not start a new line — it is written inline («Ім'я: …»),
@@ -174,52 +262,12 @@ def material_rows(engine, only_timeline=False):
     if not engine.transcripts:
         raise EditError("Немає транскрипції — спочатку транскрибуйте таймлайн.")
     on = _on_timeline(engine)
-    keys = sorted((k for k in engine.tags if k in engine.transcripts), key=lambda k: engine.tags[k])
     rows, files = [], {}
-    for key in keys:
+    for key in sorted((k for k in engine.tags if k in engine.transcripts), key=lambda k: engine.tags[k]):
         tr = engine.transcripts[key]
         files[engine.tags[key]] = "%s (%s)" % (tr.path.replace("\\", "/").split("/")[-1],
                                                _clock(tr.words[-1][1] if tr.words else 0))
-        names = [s["name"] for s in tr.speakers] or [""]
-        multi = len({w[3] for w in tr.words}) > 1
-        cur, prev_end = None, None
-
-        def flush():
-            if cur:
-                rid = cur["ids"][0] if len(cur["ids"]) == 1 else "%s-%s" % (cur["ids"][0], cur["ids"][-1])
-                rows.append({"id": rid, "t0": cur["t0"], "t1": cur["t1"], "text": " ".join(cur["text"]),
-                             "pause": cur["pause"], "file": engine.tags[key]})
-
-        for k, (a, z) in enumerate(tr.frags):
-            ws = tr.words[a:z]
-            if not ws or (only_timeline and (key, k) not in on):
-                continue
-            gap = ws[0][0] - prev_end if prev_end is not None else ws[0][0]
-            long_ = cur is not None and ws[-1][1] - cur["t0"] > ROW_MAX_SEC
-            new = (cur is None or gap >= ROW_PAUSE
-                   or (long_ and _SENT.search(cur["text"][-1]))
-                   or (cur is not None and ws[-1][1] - cur["t0"] > ROW_MAX_HARD))
-            if new:
-                flush()
-                cur = {"ids": [], "t0": ws[0][0], "t1": ws[-1][1], "text": [], "sp": None,
-                       "pause": gap if prev_end is not None else 0}
-            # inline speaker label wherever the speaker changes (not when there is only one)
-            parts, run = [], []
-            for w in ws:
-                sp = w[3] if w[3] < len(names) else 0
-                if multi and sp != cur["sp"]:
-                    if run:
-                        parts.append(_join(run))
-                        run = []
-                    run.append("%s:" % names[sp])
-                    cur["sp"] = sp
-                run.append(w[2])
-            parts.append(_join(run))
-            cur["ids"].append(short_id(engine, key, k))
-            cur["text"].append(" ".join(p for p in parts if p))
-            cur["t1"] = ws[-1][1]
-            prev_end = ws[-1][1]
-        flush()
+        rows += _file_rows(engine, key, lambda k, key=key: not only_timeline or (key, k) in on)
     return rows, files
 
 
@@ -253,17 +301,19 @@ def export_for_claude(engine, budget=TOKEN_BUDGET, only_timeline=False):
     brief = get_brief(engine)
     tl = engine.view.get("tl") or engine.project_name or "timeline"
     lines = [_row_line(r) for r in rows]
-    what = "З матеріалу нижче (таймлайн «%s») змонтуй відео." % tl
-    single = _prompt([_brief_lines(brief, what), ["ПРАВИЛА"] + ["- " + x for x in RULES],
+    what = "Нижче — транскрипція запису (таймлайн «%s»). Визнач, яке YouTube-відео з нього можна зробити, і склади план монтажу." % tl
+    single = _prompt([_brief_lines(brief, what), APPROACH, ["ПРАВИЛА"] + ["- " + x for x in RULES],
                       _answer_lines(ANSWER_SCHEMA), _material_head(files, only_timeline) + [""] + lines])
     total = estimate_tokens(single)
     if total <= budget:
         return {"mode": "single", "tokens": total, "files": [("%s.prompt.txt" % _safe(tl), single)]}
     head = lambda i, n: [  # noqa: E731
-        _brief_lines(brief, "Це частина %d з %d довгого запису (таймлайн «%s»). Зараз потрібні не сюжети, а ключові "
-                            "моменти: усе помітне (смішне, напружене, драматичне, поворотне, епічне, важливий контекст), "
-                            "приблизно 1 на 1–3 хв. З них на наступному етапі складуться варіанти нижче." % (i, n, tl)),
-        ["ПРАВИЛА"] + ["- " + x for x in RULES[:2] + RULES[4:]],
+        _brief_lines(brief, "Це частина %d з %d довгого запису (таймлайн «%s»). Зараз потрібне не відео, а моменти, "
+                            "з яких на наступному етапі складеться відео: те, що може зацікавити стороннього глядача "
+                            "(смішне, абсурдне, цікава взаємодія, вміння, незвичайна механіка), і контекст, без якого "
+                            "їх не зрозуміти. Пропускай те, що цікаве лише учасникам. Сила 1–5 — чесно, з погляду "
+                            "людини, яка не знає автора; слабку частину можна віддати майже порожньою." % (i, n, tl)),
+        ["ПРАВИЛА"] + ["- " + x for x in BEATS_RULES],
         _answer_lines(dict(BEATS_SCHEMA, part=i))]
     parts = _split(lines, budget - estimate_tokens(_prompt(head(99, 99))) - 150, overlap=2)
     if len(parts) == 1:  # nothing to split (e.g. one very long line): a single prompt is still best
@@ -387,8 +437,10 @@ def export_stage2(engine):
         quote = " «%s»" % bt["quote"] if bt.get("quote") else ""
         lines.append("%s [%s · %s]%s %s — %s%s" % (bt["fragments"], bt.get("time", ""), _len_text(max(1, _span_seconds(engine, ids))),
                                                   " (%s)" % kind if kind else "", bt.get("title", ""), bt.get("summary", ""), quote))
-    text = _prompt([_brief_lines(brief, "Нижче — ключові моменти довгого запису (таймлайн «%s»). Склади з них відео." % tl),
-                    ["ПРАВИЛА"] + ["- " + x for x in RULES[:5]],
+    text = _prompt([_brief_lines(brief, "Нижче — моменти, відібрані з довгого запису (таймлайн «%s»). Визнач, яке "
+                                        "YouTube-відео з них можна зробити, і склади план монтажу." % tl),
+                    APPROACH,
+                    ["ПРАВИЛА"] + ["- " + x for x in RULES],
                     _answer_lines(ANSWER_SCHEMA),
                     ["МОМЕНТИ", "Рядок: id [початок · тривалість] (тип, сила 1–5) назва — опис «цитата».", ""] + lines])
     return ("%s.stage2.prompt.txt" % _safe(tl), text)
@@ -396,13 +448,6 @@ def export_stage2(engine):
 
 def _safe(name):
     return re.sub(r"[^\w\-]+", "_", name)[:60] or "timeline"
-
-
-def export_transcript(engine, max_chars=None, only_timeline=False):
-    """List of {"name", "text", "mode", "tokens"} (kept for scripts/tests)."""
-    budget = int(max_chars / 2.5) if max_chars else TOKEN_BUDGET
-    res = export_for_claude(engine, budget, only_timeline)
-    return [{"name": n, "text": t, "mode": res["mode"], "tokens": res["tokens"]} for n, t in res["files"]]
 
 
 def _join(tokens):
@@ -497,51 +542,63 @@ def import_any(engine, text):
     return {"kind": "stories", "imported": [x["uid"] for x in res]}
 
 
+def _scene(engine, sc, m):
+    """One scene of the model's answer -> (scene, warnings)."""
+    ids, warnings = expand_refs(engine, sc.get("fragments") or sc.get("fragment_ids") or [])
+    vo = sc.get("voiceover")
+    if isinstance(vo, str):
+        vo = {"text": vo, "placement": "over"}
+    if vo and not (vo.get("text") or "").strip():
+        vo = None
+    role = str(sc.get("role") or "other").lower().strip()
+    scene = {"uid": uuid.uuid4().hex[:8], "id": str(sc.get("id") or "s%d" % m),
+             "title": sc.get("title") or "Сцена %d" % m, "summary": sc.get("summary") or "",
+             "role": role if role in ROLES else "other", "role_label": role,
+             "role_note": sc.get("role_note") or sc.get("purpose") or "",
+             "fragments": ids, "edit_notes": sc.get("edit_notes") or sc.get("editing") or "",
+             "visual": sc.get("visual") or "", "voiceover": vo, "transition": sc.get("transition") or "",
+             "context": sc.get("context") or "", "enabled": True}
+    return scene, ["Сцена %d: %s" % (m, x) for x in warnings]
+
+
+def _story(engine, s, n, source):
+    """One variant of the model's answer, with warnings about what does not fit."""
+    scenes, warnings = [], []
+    for m, sc in enumerate(s.get("scenes") or [], 1):
+        scene, w = _scene(engine, sc, m)
+        scenes.append(scene)
+        warnings += w
+    if not scenes:
+        warnings.append("Варіант без сцен")
+    # the model often misjudges length: compare what it picked with what the user asked for
+    actual = _span_seconds(engine, [f for sc in scenes for f in sc["fragments"]])
+    lo, hi, _ = brief_range(get_brief(engine))
+    if scenes and actual > hi * 1.25:  # shorter than asked is fine: the duration is a limit, not a goal
+        warnings.insert(0, "Тривалість ≈ %s — довше замовлених %s" % (_len_text(actual), _len_text(hi)))
+    return {"uid": uuid.uuid4().hex[:10], "id": str(s.get("id") or "v%d" % n),
+            "title": s.get("title") or "Варіант %d" % n, "logline": s.get("logline") or s.get("concept") or "",
+            "concept": s.get("concept") or s.get("description") or "", "why_watch": s.get("why_watch") or "",
+            "structure": s.get("structure") or "", "risks": s.get("risks") or "",
+            "target_duration_sec": s.get("duration_sec") or s.get("target_duration_sec"),
+            "duration_sec": round(actual), "editing_notes": s.get("editing_notes") or [],
+            "music_and_sound": s.get("music_and_sound") or "", "ending": s.get("ending") or "", "scenes": scenes,
+            "warnings": warnings, "imported_at": time.strftime("%Y-%m-%d %H:%M"), "source": source}
+
+
 def import_stories(engine, text):
     data = _extract_json(text) if isinstance(text, str) else text
     stories = data.get("stories") if isinstance(data, dict) else None
     if stories is None and isinstance(data, dict) and data.get("scenes"):
         stories = [data]
+    if isinstance(stories, list) and not stories and isinstance(data, dict) and data.get("verdict"):
+        raise EditError("Мовна модель не знайшла в матеріалі окремого відео: %s" % data["verdict"])
     if not isinstance(stories, list) or not stories:
         raise EditError("Очікується JSON з масивом \"stories\" (формат %s)." % STORIES_FORMAT)
-    imported = []
-    for n, s in enumerate(stories, 1):
-        warnings = []
-        scenes = []
-        for m, sc in enumerate(s.get("scenes") or [], 1):
-            ids, w = expand_refs(engine, sc.get("fragments") or sc.get("fragment_ids") or [])
-            warnings += ["Сцена %d: %s" % (m, x) for x in w]
-            vo = sc.get("voiceover")
-            if isinstance(vo, str):
-                vo = {"text": vo, "placement": "over"}
-            if vo and not (vo.get("text") or "").strip():
-                vo = None
-            role = str(sc.get("role") or "other").lower().strip()
-            scenes.append({"uid": uuid.uuid4().hex[:8], "id": str(sc.get("id") or "s%d" % m),
-                           "title": sc.get("title") or "Сцена %d" % m, "summary": sc.get("summary") or "",
-                           "role": role if role in ROLES else "other", "role_label": role,
-                           "role_note": sc.get("role_note") or sc.get("purpose") or "",
-                           "fragments": ids, "edit_notes": sc.get("edit_notes") or sc.get("editing") or "",
-                           "voiceover": vo, "transition": sc.get("transition") or "",
-                           "context": sc.get("context") or "", "enabled": True})
-        if not scenes:
-            warnings.append("Варіант без сцен")
-        # the model often misjudges length: compare what it picked with what the user asked for
-        actual = _span_seconds(engine, [f for sc in scenes for f in sc["fragments"]])
-        lo, hi, _ = brief_range(get_brief(engine))
-        if scenes and actual and (actual < lo * 0.8 or actual > hi * 1.25):
-            warnings.insert(0, "Тривалість ≈ %s, а замовлено %s–%s" % (_len_text(actual), _len_text(lo), _len_text(hi)))
-        imported.append({"uid": uuid.uuid4().hex[:10], "id": str(s.get("id") or "v%d" % n),
-                         "title": s.get("title") or "Варіант %d" % n, "logline": s.get("logline") or "",
-                         "concept": s.get("concept") or s.get("description") or "",
-                         "target_duration_sec": s.get("duration_sec") or s.get("target_duration_sec"),
-                         "duration_sec": round(actual),
-                         "editing_notes": s.get("editing_notes") or [], "music_and_sound": s.get("music_and_sound") or "",
-                         "ending": s.get("ending") or "", "scenes": scenes, "warnings": warnings,
-                         "imported_at": time.strftime("%Y-%m-%d %H:%M"), "source": data.get("source")})
+    imported = [_story(engine, s, n, data.get("source")) for n, s in enumerate(stories, 1)]
+    for s in imported:
+        s["verdict"] = data.get("verdict") or ""
     with engine._lock:
-        engine.project_state.setdefault("stories", [])
-        engine.project_state["stories"] = imported + engine.project_state["stories"]
+        engine.project_state["stories"] = imported + engine.project_state.get("stories", [])
         engine.save_project()
     return imported
 
@@ -562,7 +619,7 @@ def update_story(engine, uid, patch):
         for sc_patch in patch.get("scenes", []):
             sc = next((x for x in s["scenes"] if x["uid"] == sc_patch.get("uid")), None)
             if sc:
-                for k in ("enabled", "title", "summary", "edit_notes", "role_note", "context", "transition"):
+                for k in ("enabled", "title", "summary", "edit_notes", "role_note", "context", "transition", "visual"):
                     if k in sc_patch:
                         sc[k] = sc_patch[k]
                 if "voiceover" in sc_patch:
@@ -643,53 +700,61 @@ def _markers(engine, plan, fps, offset0):
     return ops
 
 
+def _free_timeline_name(engine, snap, story):
+    name = re.sub(r"[\\/:*?\"<>|]", " ", "%s — %s" % (snap.get("tl") or "Timeline", story["title"]))[:120]
+    existing = {t.get("name") for t in (engine.link.info.get("timelines") or [])}
+    base, k = name, 2
+    while name in existing:
+        name = "%s (%d)" % (base, k)
+        k += 1
+    return name
+
+
+def _apply_as_new_timeline(engine, story, plan, snap, markers):
+    clips = [c for _, cs in plan for c in cs]
+    ops = [{"op": "new_timeline", "name": _free_timeline_name(engine, snap, story)},
+           {"op": "append", "clips": [{"path": c["path"], "s": c["s"], "e": c["e"], "track": 1} for c in clips]}]
+    if markers:
+        ops += _markers(engine, plan, snap["fps"], 0)
+    try:
+        res = engine.link.run(ops, timeout=120)
+    except LinkError as e:
+        raise EditError(str(e))
+    engine.rebuild()
+    if not res.get("ok"):
+        raise EditError("Resolve: %s" % res.get("err"))
+    engine.undo_stack.append({"label": "Сюжет", "undo": {"op": "timeline", "id": snap.get("tlid")}, "fp": _sig(engine)})
+    return res
+
+
+def _apply_in_place(engine, plan, snap, markers):
+    p = engine._planner()
+    start = p.items[0]["s"] if p.items else snap["start"]
+    if p.items:
+        p.delete(start, p.items[-1]["e"])
+    # sequential append (no record frames): Resolve lays the clips end to end itself,
+    # so frame-rate rounding cannot create overlaps
+    p.ops.append({"op": "append", "clips": [{"path": c["path"], "s": c["s"], "e": c["e"], "track": p.tindex}
+                                            for _, cs in plan for c in cs]})
+    if markers:
+        p.ops += _markers(engine, plan, snap["fps"], start - snap["start"])
+    return engine._exec(p, None, "Сюжет")
+
+
 def apply_story(engine, uid, mode="new", markers=True):
     """mode: "new" — a new timeline next to the current one; "replace" — rebuild the edit track."""
     story = find_story(engine, uid)
     plan = story_plan(engine, story)
-    clips = [c for _, cs in plan for c in cs]
     snap = engine.link.snapshot
     if not snap:
         raise EditError("Немає активного таймлайна в Resolve.")
-    fps = snap["fps"]
     with engine._lock:
         if mode == "new":
-            name = "%s — %s" % (snap.get("tl") or "Timeline", story["title"])
-            name = re.sub(r"[\\/:*?\"<>|]", " ", name)[:120]
-            existing = {t.get("name") for t in (engine.link.info.get("timelines") or [])}
-            base, k = name, 2
-            while name in existing:
-                name = "%s (%d)" % (base, k)
-                k += 1
-            ops = [{"op": "new_timeline", "name": name},
-                   {"op": "append", "clips": [{"path": c["path"], "s": c["s"], "e": c["e"], "track": 1} for c in clips]}]
-            if markers:
-                ops += _markers(engine, plan, fps, 0)
-            try:
-                res = engine.link.run(ops, timeout=120)
-            except Exception as e:
-                raise EditError(str(e))
-            engine.rebuild()
-            if not res.get("ok"):
-                raise EditError("Resolve: %s" % res.get("err"))
-            engine.undo_stack.append({"label": "Сюжет", "undo": {"op": "timeline", "id": snap.get("tlid")},
-                                      "fp": _sig(engine)})
-            return res
-        p = engine._planner()
-        start = p.items[0]["s"] if p.items else snap["start"]
-        if p.items:
-            p.delete(start, p.items[-1]["e"])
-        # sequential append (no record frames): Resolve lays the clips end to end itself,
-        # so frame-rate rounding cannot create overlaps
-        p.ops.append({"op": "append", "clips": [{"path": c["path"], "s": c["s"], "e": c["e"], "track": p.tindex}
-                                                for c in clips]})
-        if markers:
-            p.ops += _markers(engine, plan, fps, start - snap["start"])
-        return engine._exec(p, None, "Сюжет")
+            return _apply_as_new_timeline(engine, story, plan, snap, markers)
+        return _apply_in_place(engine, plan, snap, markers)
 
 
 def _sig(engine):
-    from .engine import content_sig
     return content_sig(engine.link.snapshot, engine.track)
 
 

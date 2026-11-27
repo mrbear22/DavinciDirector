@@ -18,182 +18,23 @@ Design (the single source of truth is the Resolve timeline):
   rebuilt from it — text and timeline cannot drift apart.
 """
 
-import bisect
 import copy
-import hashlib
 import json
 import os
 import re
 import threading
-import time
+import traceback
 
 from .link import LinkError, fingerprint, frame_to_tc, norm_path
+from .planner import Planner
 from .storage import atomic_write, base_dir
+from .transcript import Transcript, media_key, respell
 
 SPEAKER_COLORS = ["#d8a657", "#7daea3", "#d3869b", "#a9b665", "#e78a4e", "#89b482", "#ea6962", "#b0a3d4"]
 
 
 class EditError(Exception):
     pass
-
-
-# ------------------------------------------------------------------ transcripts
-
-
-def transcripts_dir():
-    d = os.path.join(base_dir(), "transcripts")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def media_key(path):
-    return hashlib.sha1(norm_path(path).encode("utf-8")).hexdigest()[:16]
-
-
-class Transcript:
-    """Words of one media file.  words: [t0, t1, text, speaker_index, prob]."""
-
-    def __init__(self, path, words=None, speakers=None, frags=None, lang=None, covered=None, meta=None):
-        self.path = path
-        self.words = words or []
-        self.speakers = speakers or [{"id": "S1", "name": "Мовець 1"}]
-        self.frags = frags if frags is not None else segment(self.words)
-        self.lang = lang
-        self.covered = covered or ([[self.words[0][0], self.words[-1][1]]] if self.words else [])
-        self.meta = meta or {}
-        self._mids = None
-
-    @property
-    def key(self):
-        return media_key(self.path)
-
-    def mids(self):
-        if self._mids is None or len(self._mids) != len(self.words):
-            self._mids = [(w[0] + w[1]) / 2.0 for w in self.words]
-        return self._mids
-
-    def range_for(self, src0, src1):
-        """Word index range [i0, i1) whose midpoints lie in [src0, src1)."""
-        m = self.mids()
-        return bisect.bisect_left(m, src0), bisect.bisect_left(m, src1)
-
-    def frag_of(self, idx):
-        starts = [f[0] for f in self.frags]
-        k = bisect.bisect_right(starts, idx) - 1
-        return k if 0 <= k < len(self.frags) and idx < self.frags[k][1] else None
-
-    def gap_before(self, i, pad=0.3):
-        """Source time of the cut point before word i."""
-        w = self.words[i]
-        if i == 0:
-            return max(0.0, w[0] - pad)
-        prev = self.words[i - 1]
-        return max((prev[1] + w[0]) / 2.0, w[0] - pad)
-
-    def gap_after(self, i, pad=0.3):
-        w = self.words[i]
-        if i + 1 >= len(self.words):
-            return w[1] + pad
-        nxt = self.words[i + 1]
-        return min((w[1] + nxt[0]) / 2.0, w[1] + pad)
-
-    def to_json(self):
-        return {"path": self.path, "lang": self.lang, "speakers": self.speakers, "frags": self.frags,
-                "covered": self.covered, "meta": self.meta, "words": self.words}
-
-    @classmethod
-    def from_json(cls, d):
-        return cls(d["path"], [list(w) for w in d.get("words", [])], d.get("speakers"), d.get("frags"),
-                   d.get("lang"), d.get("covered"), d.get("meta"))
-
-    def save(self):
-        atomic_write(os.path.join(transcripts_dir(), self.key + ".json"), json.dumps(self.to_json(), ensure_ascii=False))
-
-    @classmethod
-    def load(cls, path):
-        f = os.path.join(transcripts_dir(), media_key(path) + ".json")
-        if not os.path.exists(f):
-            return None
-        with open(f, encoding="utf-8") as fh:
-            return cls.from_json(json.load(fh))
-
-
-_SENT_END = re.compile(r"[.!?…]+[\"»”')\]]*$")
-
-
-def segment(words, max_words=60, max_len=25.0, pause=1.0):
-    """Split words into fragments: speaker change, long pause, sentence end."""
-    frags, start = [], 0
-    for i in range(1, len(words) + 1):
-        if i == len(words):
-            frags.append([start, i])
-            break
-        prev, cur = words[i - 1], words[i]
-        n = i - start
-        dur = prev[1] - words[start][0]
-        brk = (cur[3] != prev[3] or cur[0] - prev[1] >= pause or n >= max_words or dur >= max_len
-               or (n >= 4 and _SENT_END.search(prev[2] or "") and cur[0] - prev[1] >= 0.15)
-               or (n >= 12 and _SENT_END.search(prev[2] or "")))
-        if brk:
-            frags.append([start, i])
-            start = i
-    return frags if words else []
-
-
-def _norm_word(w):
-    return re.sub(r"[\W_]+", "", (w or "").lower())
-
-
-def _spread(slots, texts):
-    """New words over the time of `slots` (old words), proportional to their length; speaker of the
-    slot each new word lands in."""
-    t0, t1 = slots[0][0], slots[-1][1]
-    if len(slots) == len(texts):
-        return [[s[0], s[1], t, s[3], 1.0] for s, t in zip(slots, texts)]
-    weights = [max(1, len(t)) for t in texts]
-    total, pos, out = float(sum(weights)), t0, []
-    for t, wgt in zip(texts, weights):
-        end = pos + (t1 - t0) * wgt / total
-        mid = (pos + end) / 2
-        spk = next((s[3] for s in slots if s[0] <= mid <= s[1]), slots[0][3])
-        out.append([round(pos, 3), round(end, 3), t, spk, 1.0])
-        pos = end
-    out[-1][1] = t1
-    return out
-
-
-def _respell(old, new):
-    """Words for a corrected phrase: words the user kept keep their exact timing."""
-    import difflib
-    ops = difflib.SequenceMatcher(None, [_norm_word(w[2]) for w in old], [_norm_word(t) for t in new],
-                                  autojunk=False).get_opcodes()
-    out, pending = [], None  # inserted words wait for the next old word to share its time
-    for tag, a, b, c, d in ops:
-        if tag == "equal":
-            for k in range(b - a):
-                w = list(old[a + k])
-                w[2] = new[c + k]
-                if pending:
-                    out.extend(_spread([w], pending + [w[2]]))
-                    pending = None
-                else:
-                    out.append(w)
-        elif tag == "delete":
-            continue  # the sound stays in the video, it just has no text now
-        elif tag == "insert":
-            pending = (pending or []) + new[c:d]
-        else:  # replace
-            out.extend(_spread(old[a:b], (pending or []) + new[c:d]))
-            pending = None
-    if pending:  # words added at the very end share the last word's time
-        if out:
-            last = out.pop()
-            out.extend(_spread([last], [last[2]] + pending))
-        else:
-            out.extend(_spread(old, pending))
-    if not out:
-        out = _spread(old, new)
-    return out
 
 
 # ------------------------------------------------------------------ view
@@ -222,6 +63,33 @@ def same_content(a, b, tol=0.25):
     return all(x[0] == y[0] and all(abs(p - q) <= tol for p, q in zip(x[1:], y[1:])) for x, y in zip(a, b))
 
 
+def _unused_runs(blocks, n_words):
+    """Word ranges [a, z) of a file that no clip uses."""
+    runs, pos = [], 0
+    for a, z in sorted((b["i0"], b["i1"]) for b in blocks if b["i1"] > b["i0"]):
+        if a > pos:
+            runs.append((pos, a))
+        pos = max(pos, z)
+    if pos < n_words:
+        runs.append((pos, n_words))
+    return runs
+
+
+def _place_cut_words(blocks, n_words):
+    """Unused words are shown as cut next to their source neighbour: after the clip that ends where
+    they start, else before the clip that starts where they end."""
+    for a, z in _unused_runs(blocks, n_words):
+        pred = next((b for b in blocks if b["i1"] == a and b["i1"] > b["i0"]), None)
+        if pred is None:
+            pred = next((b for b in blocks if b["i1"] <= a and b["i1"] > b["i0"] and
+                         not any(c["i0"] < a and c["i1"] > b["i1"] for c in blocks)), None)
+        if pred is not None:
+            pred["cut"].append({"side": "after", "i0": a, "i1": z})
+            continue
+        succ = next((b for b in blocks if b["i0"] == z), None) or min(blocks, key=lambda b: abs(b["i0"] - z))
+        succ["cut"].append({"side": "before", "i0": a, "i1": z})
+
+
 def build_view(snap, track, transcripts, tags):
     """Blocks of the edit track in timeline order with their word ranges."""
     if not snap:
@@ -241,191 +109,10 @@ def build_view(snap, track, transcripts, tags):
             b["covered"] = any(c[0] <= it["src0"] + 0.5 and c[1] >= it["src1"] - 0.5 for c in tr.covered)
             by_media.setdefault(key, []).append(b)
         blocks.append(b)
-    # words of transcribed media that no clip uses -> show as cut next to their source neighbour
     for key, bl in by_media.items():
-        tr = transcripts[key]
-        used = sorted((b["i0"], b["i1"]) for b in bl if b["i1"] > b["i0"])
-        runs, pos = [], 0
-        for a, z in used:
-            if a > pos:
-                runs.append((pos, a))
-            pos = max(pos, z)
-        if pos < len(tr.words):
-            runs.append((pos, len(tr.words)))
-        for a, z in runs:
-            pred = next((b for b in bl if b["i1"] == a and b["i1"] > b["i0"]), None)
-            if pred is None:
-                pred = next((b for b in bl if b["i1"] <= a and b["i1"] > b["i0"] and
-                             not any(c["i0"] < a and c["i1"] > b["i1"] for c in bl)), None)
-            if pred is not None:
-                pred["cut"].append({"side": "after", "i0": a, "i1": z})
-                continue
-            succ = next((b for b in bl if b["i0"] == z), None) or min(bl, key=lambda b: abs(b["i0"] - z))
-            succ["cut"].append({"side": "before", "i0": a, "i1": z})
+        _place_cut_words(bl, len(transcripts[key].words))
     return {"blocks": blocks, "fps": fps, "start": snap["start"], "fp": fingerprint(snap), "tl": snap.get("tl"),
             "track": track, "check": snap.get("check") or []}
-
-
-# ------------------------------------------------------------------ planner
-
-
-class Planner:
-    """Simulates the edit track while emitting bridge operations, so that every
-    item reference ({t, i, s}) is valid at the moment the bridge executes it."""
-
-    def __init__(self, snap, track):
-        self.fps = snap["fps"]
-        self.track = track
-        self.items = [dict(it) for it in snap["tracks"].get(track, [])]
-        self.ttype = self.items[0]["t"] if self.items else ("audio" if track.startswith("audio") else "video")
-        self.tindex = self.items[0]["i"] if self.items else int(re.sub(r"\D", "", track) or 1)
-        ends = [it["e"] for key in snap["tracks"] for it in snap["tracks"][key]]
-        self.max_end = max(ends + [snap["start"]])
-        self.start = snap["start"]
-        self.ops = []
-
-    def ref(self, it):
-        return {"t": it["t"], "i": it["i"], "s": it["s"]}
-
-    def _sort(self):
-        self.items.sort(key=lambda x: x["s"])
-
-    def tl_frames(self, src_frames, mfps):
-        return int(round(src_frames * self.fps / mfps))
-
-    def src_frames(self, tl_frames, mfps):
-        return int(round(tl_frames * mfps / self.fps))
-
-    def at(self, f):
-        return next((it for it in self.items if it["s"] < f < it["e"]), None)
-
-    def split(self, f):
-        x = self.at(f)
-        if x is None:
-            return
-        cut = x["sf0"] + self.src_frames(f - x["s"], x["mfps"])
-        end = x["sf0"] + self.src_frames(x["e"] - x["s"], x["mfps"])
-        self.ops.append({"op": "trim_end", "ref": self.ref(x), "n": x["e"] - f})
-        old_e = x["e"]
-        x["e"] = f
-        x["src1"] = x["src0"] + (f - x["s"]) / self.fps
-        self.ops.append({"op": "append", "clips": [self._clip(x["path"], cut, end, f, via=x)]})
-        y = dict(x, s=f, e=old_e, sf0=cut, src0=cut / x["mfps"], src1=cut / x["mfps"] + (old_e - f) / self.fps)
-        self.items.append(y)
-        self._sort()
-
-    def _clip(self, path, s, e, rec=None, via=None):
-        c = {"path": path, "s": int(s), "e": int(e), "track": self.tindex}
-        if via is None:
-            via = next((it for it in self.items if norm_path(it["path"]) == norm_path(path)), None)
-        if via is not None:
-            c["via"] = self.ref(via)
-        if rec is not None:
-            c["rec"] = int(rec)
-        if self.ttype == "audio":
-            c["mt"] = 2
-        return c
-
-    def shift_from(self, f, delta, exclude=()):
-        group = [it for it in self.items if it["s"] >= f and it not in exclude]
-        if not group or not delta:
-            return
-        self.ops.append({"op": "move", "refs": [self.ref(it) for it in group], "to": group[0]["s"] + delta})
-        for it in group:
-            it["s"] += delta
-            it["e"] += delta
-        self._sort()
-
-    def clips_between(self, f1, f2):
-        """Source ranges (path, src frames) of the edit track in [f1, f2)."""
-        out = []
-        for it in self.items:
-            a, z = max(it["s"], f1), min(it["e"], f2)
-            if z > a:
-                s = it["sf0"] + self.src_frames(a - it["s"], it["mfps"])
-                out.append({"path": it["path"], "s": s, "e": s + self.src_frames(z - a, it["mfps"]), "mfps": it["mfps"]})
-        return out
-
-    def delete(self, f1, f2):
-        clips = self.clips_between(f1, f2)
-        self.split(f1)
-        self.split(f2)
-        victims = [it for it in self.items if it["s"] >= f1 and it["e"] <= f2]
-        if victims:
-            self.ops.append({"op": "delete", "refs": [self.ref(it) for it in victims]})
-            for it in victims:
-                self.items.remove(it)
-        self.shift_from(f2, -(f2 - f1))
-        return clips
-
-    def insert(self, f, clips, slack=0):
-        self.split(f)
-        durs = [self.tl_frames(c["e"] - c["s"], c["mfps"]) for c in clips]
-        total = sum(durs)
-        self.shift_from(f, total + slack)
-        rec, specs = f, []
-        for c, d in zip(clips, durs):
-            specs.append(self._clip(c["path"], c["s"], c["e"], rec))
-            self.items.append({"t": self.ttype, "i": self.tindex, "s": rec, "e": rec + d, "sf0": c["s"],
-                               "mfps": c["mfps"], "path": c["path"], "name": os.path.basename(c["path"]),
-                               "src0": c["s"] / c["mfps"], "src1": c["s"] / c["mfps"] + d / self.fps})
-            rec += d
-        if specs:
-            self.ops.append({"op": "append", "clips": specs})
-        self._sort()
-        return total
-
-    def extend_end(self, item, src_end):
-        """Lengthen ``item`` to source frame ``src_end`` rippling later clips."""
-        cur_end = item["sf0"] + self.src_frames(item["e"] - item["s"], item["mfps"])
-        d = self.tl_frames(src_end - cur_end, item["mfps"])
-        if d <= 0:
-            return 0
-        self.shift_from(item["e"], d, exclude=(item,))
-        self.ops.append({"op": "trim_end", "ref": self.ref(item), "n": -d})
-        item["e"] += d
-        return d
-
-    def move(self, f1, f2, fd):
-        if f1 <= fd <= f2 or f2 <= f1:
-            return None
-        self.split(f1)
-        self.split(f2)
-        self.split(fd)
-        d = f2 - f1
-        block = [it for it in self.items if it["s"] >= f1 and it["e"] <= f2]
-        if not block:
-            return None
-        park = max([self.max_end] + [it["e"] for it in self.items]) + 50
-        self.ops.append({"op": "move", "refs": [self.ref(it) for it in block], "to": park})
-        off = park - block[0]["s"]
-        for it in block:
-            it["s"] += off
-            it["e"] += off
-        if fd > f2:
-            mid = [it for it in self.items if f2 <= it["s"] < fd and it not in block]
-            dest = fd - d
-            if mid:
-                self.ops.append({"op": "move", "refs": [self.ref(it) for it in mid], "to": mid[0]["s"] - d})
-                for it in mid:
-                    it["s"] -= d
-                    it["e"] -= d
-        else:
-            mid = [it for it in self.items if fd <= it["s"] < f1 and it not in block]
-            dest = fd
-            if mid:
-                self.ops.append({"op": "move", "refs": [self.ref(it) for it in mid], "to": mid[0]["s"] + d})
-                for it in mid:
-                    it["s"] += d
-                    it["e"] += d
-        first = min(block, key=lambda x: x["s"])
-        self.ops.append({"op": "move", "refs": [self.ref(it) for it in block], "to": dest})
-        off = dest - first["s"]
-        for it in block:
-            it["s"] += off
-            it["e"] += off
-        self._sort()
-        return dest
 
 
 # ------------------------------------------------------------------ engine
@@ -458,8 +145,7 @@ class Engine:
         for fn in list(self.listeners):
             try:
                 fn(kind, data)
-            except Exception:
-                import traceback
+            except Exception:  # a failing listener must not stop the others
                 traceback.print_exc()
 
     def _on_link(self, kind, data):
@@ -491,8 +177,8 @@ class Engine:
                 try:
                     with open(p, encoding="utf-8") as f:
                         self.project_state.update(json.load(f))
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as e:  # the stories of this project are lost, the program goes on
+                    print("Project state not read (%s): %r" % (p, e))
             self.tags = dict(self.project_state.get("tags") or {})
             self.track = self.project_state.get("track") or self.track
             for key in list(self.transcripts):
@@ -859,32 +545,39 @@ class Engine:
         starts = [b["src0"] for b in self.view["blocks"] if b["m"] == key and b["i0"] >= idx]
         return min(starts) if starts else None
 
+    def _check_history(self, entry, stack, message):
+        if not same_content(entry["fp"], content_sig(self.link.snapshot, self.track)):
+            stack.clear()
+            raise EditError(message)
+
+    def _revert(self, u):
+        """Undo one recorded action; returns how to redo it (or None)."""
+        if u["op"] == "text":
+            redo = self._text_snapshot(u["keys"])
+            self._text_restore(u)
+            return redo
+        if u["op"] == "insert":
+            f, total = self._do_insert(u["f"], u["clips"])
+            return {"op": "delete", "f1": f, "f2": f + total}
+        if u["op"] == "delete":
+            f1, clips = self._do_delete(u["f1"], u["f2"])
+            return {"op": "insert", "f": f1, "clips": clips}
+        if u["op"] == "move":
+            return self._do_move(u["f1"], u["f2"], u["fd"])
+        if u["op"] == "timeline":
+            self._run([{"op": "set_timeline", "id": u["id"]}])
+            return None
+        raise EditError("Невідома дія скасування.")
+
     def undo(self):
         with self._lock:
             if not self.undo_stack:
                 raise EditError("Нічого скасовувати.")
             entry = self.undo_stack[-1]
-            if not same_content(entry["fp"], content_sig(self.link.snapshot, self.track)):
-                self.undo_stack.clear()
-                raise EditError("Таймлайн змінено в Resolve — історію скасувань очищено (використайте Ctrl+Z у Resolve).")
+            self._check_history(entry, self.undo_stack,
+                                "Таймлайн змінено в Resolve — історію скасувань очищено (використайте Ctrl+Z у Resolve).")
             self.undo_stack.pop()
-            u = entry["undo"]
-            if u["op"] == "text":
-                redo = self._text_snapshot(u["keys"])
-                self._text_restore(u)
-            elif u["op"] == "insert":
-                f, total = self._do_insert(u["f"], u["clips"])
-                redo = {"op": "delete", "f1": f, "f2": f + total}
-            elif u["op"] == "delete":
-                f1, clips = self._do_delete(u["f1"], u["f2"])
-                redo = {"op": "insert", "f": f1, "clips": clips}
-            elif u["op"] == "move":
-                redo = self._do_move(u["f1"], u["f2"], u["fd"])
-            elif u["op"] == "timeline":
-                self._run([{"op": "set_timeline", "id": u["id"]}])
-                redo = None
-            else:
-                raise EditError("Невідома дія скасування.")
+            redo = self._revert(entry["undo"])
             if redo:
                 self.redo_stack.append({"label": entry["label"], "undo": redo, "fp": content_sig(self.link.snapshot, self.track)})
             return {"ok": True}
@@ -894,9 +587,7 @@ class Engine:
             if not self.redo_stack:
                 raise EditError("Нічого повторювати.")
             entry = self.redo_stack.pop()
-            if not same_content(entry["fp"], content_sig(self.link.snapshot, self.track)):
-                self.redo_stack.clear()
-                raise EditError("Таймлайн змінено в Resolve.")
+            self._check_history(entry, self.redo_stack, "Таймлайн змінено в Resolve.")
             saved, self.redo_stack = self.redo_stack, []
             try:
                 u = entry["undo"]
@@ -937,15 +628,21 @@ class Engine:
                 "topics": _copy.deepcopy(self.project_state.get("topics") or [])}
 
     def _text_restore(self, snap):
+        restored = []
         for k, d in snap["tr"].items():
             tr = self.transcripts.get(k)
-            if tr is None:
-                continue
-            tr.words, tr.frags, tr.speakers = d["words"], d["frags"], d["speakers"]
-            tr._mids = None
-            tr.save()
+            if tr is not None:
+                tr.words, tr.frags, tr.speakers = d["words"], d["frags"], d["speakers"]
+                tr._mids = None
+                restored.append(tr)
         self.project_state["topics"] = snap["topics"]
         self.save_project()
+        self._text_changed(restored)
+
+    def _text_changed(self, transcripts):
+        """Words or speakers of these transcripts changed (the video did not)."""
+        for tr in transcripts:
+            tr.save()
         self.tversion += 1
         self.rebuild(force=True)
 
@@ -965,9 +662,7 @@ class Engine:
                 raise EditError("Порожнє слово — щоб прибрати слово з відео, виріжте його.")
             self._text_undo([key], "Виправлення")
             tr.words[idx][2] = text
-            tr.save()
-            self.tversion += 1
-            self.rebuild(force=True)
+            self._text_changed([tr])
 
     def edit_words(self, key, i0, i1, text):
         """Replace the text of words[i0:i1] (a phrase or a whole sentence) with `text`.
@@ -983,7 +678,7 @@ class Engine:
                 raise EditError("Порожній текст — щоб прибрати слова з відео, виріжте їх.")
             self._text_undo([key], "Виправлення")
             old = tr.words[i0:i1]
-            out = _respell(old, new)
+            out = respell(old, new)
             d = len(out) - len(old)
             tr.words[i0:i1] = out
             tr._mids = None
@@ -997,9 +692,7 @@ class Engine:
                     elif t.get("m") == key and t.get("i", 0) > i0:
                         t["i"] = i0
                 self.save_project()
-            tr.save()
-            self.tversion += 1
-            self.rebuild(force=True)
+            self._text_changed([tr])
 
     def rename_speaker(self, key, sid, name):
         with self._lock:
@@ -1008,9 +701,7 @@ class Engine:
             for s in tr.speakers:
                 if s["id"] == sid:
                     s["name"] = (name or "").strip() or s["name"]
-            tr.save()
-            self.tversion += 1
-            self.rebuild(force=True)
+            self._text_changed([tr])
 
     def _speaker_index(self, tr, sid):
         if sid == "new":
@@ -1023,10 +714,6 @@ class Engine:
             if s["id"] == sid:
                 return i
         raise EditError("Мовця %s немає." % sid)
-
-    def set_fragment_speaker(self, key, frag, sid):
-        a, z = self.transcripts[key].frags[frag]
-        self.set_words_speaker([{"m": key, "i0": a, "i1": z}], sid)
 
     def set_words_speaker(self, ranges, sid):
         """Give exactly these words [{m, i0, i1}] to speaker ``sid`` ("new" = a new speaker per file).
@@ -1048,10 +735,7 @@ class Engine:
                     w[3] = touched[key]
             if not touched:
                 raise EditError("Виділіть слова.")
-            for key in touched:
-                self.transcripts[key].save()
-            self.tversion += 1
-            self.rebuild(force=True)
+            self._text_changed([self.transcripts[key] for key in touched])
 
     def transcript_payload(self):
         out = {}

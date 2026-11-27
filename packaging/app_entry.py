@@ -1,7 +1,5 @@
 """Entry point of the installed program (embedded Python, see build.py).
 
-    pythonw dd_entry.py               open the panel (or bring the running app's window)
-    pythonw dd_entry.py --background  hidden watcher (started at login via HKCU Run)
     pythonw dd_entry.py --quit        stop a running copy (installer / uninstaller)
     python  dd_entry.py --selftest F  check the installation, write a JSON report to F
 """
@@ -9,7 +7,6 @@
 import json
 import os
 import sys
-import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -62,31 +59,8 @@ def run():
         return selftest(args[1] if len(args) > 1 else "selftest.json")
     if args[:1] == ["--quit"]:
         quit_running()
-        return 0
-    from davinci_director.storage import setup_env
-    setup_env()
-    from davinci_director.__main__ import main
-    return main(args)
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(run())
-    except SystemExit:
-        raise
-    except Exception:
-        try:
-            from davinci_director.storage import base_dir
-            log = os.path.join(base_dir(), "crash.log")
-        except Exception:
-            log = os.path.join(os.environ.get("TEMP", "."), "DaVinciDirector-crash.log")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        with open(log, "a", encoding="utf-8") as f:
-            traceback.print_exc(file=f)
-        try:
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(None, "DaVinci Director не запустився. Подробиці: %s" % log,
-                                             "DaVinci Director", 0x10)
-        except Exception:
-            pass
-        sys.exit(1)
+    sys.exit(run())

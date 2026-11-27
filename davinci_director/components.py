@@ -1,8 +1,7 @@
-"""Optional components, downloaded while the program runs (not shipped in the installer).
+"""Components downloaded while the program runs (not shipped in the installer).
 
-    whisper   speech recognition: faster-whisper + CTranslate2 + PyAV (FFmpeg libraries)
-    gpu       NVIDIA cuBLAS/cuDNN so Whisper runs on the graphics card
-    speakers  pyannote.audio + torch for speaker detection
+    audio     PyAV (FFmpeg libraries), Silero VAD on onnxruntime: reading audio, finding speech
+    speakers  torch + transformers (Parakeet speech recognition) + pyannote.audio (speaker detection)
 
 How a component is installed (per user, no admin rights):
   1. ``pip install --dry-run --report`` resolves the exact files (URLs + SHA-256);
@@ -10,11 +9,11 @@ How a component is installed (per user, no admin rights):
   3. ``pip install --no-index --find-links`` installs from the local files into
      <program folder>\\components\\<name> (see storage.root()).
 Each component has its own folder, so installing one never touches files of another
-that is already loaded.  In a development checkout whose environment already has the
-packages nothing is downloaded.
+that is already loaded.
 """
 
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -24,21 +23,20 @@ import sys
 import threading
 from urllib.parse import unquote
 
-from . import downloader
+from . import Cancelled, downloader
 
-ORDER = ("whisper", "speakers", "gpu")
+ORDER = ("audio", "speakers")
 COMPONENTS = {
-    # faster-whisper stays for its Silero voice-activity detector (and PyAV/FFmpeg, huggingface_hub)
-    "whisper": {"label": "аудіо й пошук мовлення (FFmpeg, Silero VAD)", "size": "≈ 170 МБ",
-                "check": ["faster_whisper", "ctranslate2", "av"], "pip": ["faster-whisper>=1.1", "numpy"]},
+    # without dependencies: silero-vad would pull a second torch (it uses the one of "speakers"),
+    # onnxruntime its developer tools; what they need at run time is listed here
+    "audio": {"label": "аудіо й пошук мовлення (FFmpeg, Silero VAD)", "size": "≈ 60 МБ",
+              "check": ["av", "numpy", "onnxruntime", "silero_vad"], "no_deps": True,
+              "verify": ["av", "numpy", "onnxruntime"],  # silero_vad imports torch of "speakers"
+              "pip": ["av", "numpy", "silero-vad", "onnxruntime", "flatbuffers", "protobuf", "packaging"]},
     # one torch for both: speech recognition (Parakeet through transformers) and speaker detection (pyannote)
     "speakers": {"label": "нейромережі: розпізнавання Parakeet і визначення мовців (torch, transformers, pyannote)",
                  "size": "≈ 1 ГБ", "check": ["torch", "transformers", "pyannote.audio"],
                  "pip": ["pyannote.audio", "transformers>=5.20,<6"]},
-    # CUDA libraries for the former Whisper engine; Parakeet uses the CUDA build of torch instead.
-    # Kept only so that an existing copy is shown and can be removed in «Компоненти й моделі».
-    "gpu": {"label": "бібліотеки CUDA для Whisper (більше не потрібні, можна видалити)", "size": "≈ 1 ГБ",
-            "check": [], "pip": ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]},
 }
 
 _lock = threading.Lock()
@@ -87,11 +85,6 @@ def activate():
     importlib.invalidate_caches()
 
 
-def _gpu_installed():
-    roots = [component_dir("gpu")] + [p for p in sys.path if p.endswith("site-packages")]
-    return any(os.path.isdir(os.path.join(r, "nvidia", "cublas", "bin")) for r in roots)
-
-
 # Speaker detection on the graphics card: PyPI has only CPU builds of torch for Windows, the CUDA builds are on
 # the PyTorch index.  Versions are pinned together (torch/torchaudio/torchcodec must match) and were checked
 # with pyannote.audio 4.1 on an RTX 4050 (driver CUDA 13.5).
@@ -129,11 +122,13 @@ def _torch_is_cpu_build(path):
 
 
 def pip_spec(name):
-    """(packages, extra pip arguments) for installing a component on this computer."""
-    spec = list(COMPONENTS[name]["pip"])
+    """(packages, arguments for resolving, arguments for installing) on this computer."""
+    spec = COMPONENTS[name]
+    packages = list(spec["pip"])
+    deps = ["--no-deps"] if spec.get("no_deps") else []
     if name == "speakers" and speakers_on_gpu():
-        return spec + TORCH_CUDA["pins"], ["--extra-index-url", TORCH_CUDA["index"]]
-    return spec, []
+        return packages + TORCH_CUDA["pins"], ["--extra-index-url", TORCH_CUDA["index"]], deps
+    return packages, deps, deps
 
 
 def installed(name):
@@ -144,9 +139,7 @@ def installed(name):
             return True
         activate()
         d = component_dir(name)
-        if name == "gpu":
-            ok = _gpu_installed()
-        elif name == "speakers" and os.path.isdir(d) and speakers_on_gpu() and _torch_is_cpu_build(d):
+        if name == "speakers" and os.path.isdir(d) and speakers_on_gpu() and _torch_is_cpu_build(d):
             # an older install (CPU-only torch) on a computer with a suitable NVIDIA card: replace it before use
             errors[name] = "встановлено версію лише для процесора"
             ok = False
@@ -164,14 +157,10 @@ def installed(name):
                 errors[name] = problem
             ok = not problem
         else:
-            ok = True
-            for mod in COMPONENTS[name]["check"]:
-                try:
-                    importlib.import_module(mod)
-                except Exception as e:
-                    errors[name] = "%s: %s" % (type(e).__name__, e)
-                    ok = False
-                    break
+            missing = [m for m in COMPONENTS[name]["check"] if importlib.util.find_spec(m) is None]
+            if missing:
+                errors[name] = "немає: " + ", ".join(missing)
+            ok = not missing
         if ok:
             _ok.add(name)
             errors.pop(name, None)
@@ -199,11 +188,9 @@ def _read(path):
 
 
 def _write_mark(folder):
-    try:
-        with open(os.path.join(folder, VERIFIED), "w", encoding="utf-8") as f:
-            f.write(_verified_mark(folder))
-    except OSError:
-        pass
+    """Without the mark the next start only checks the component again (seconds)."""
+    with open(os.path.join(folder, VERIFIED), "w", encoding="utf-8") as f:
+        f.write(_verified_mark(folder))
 
 
 def _loaded_from(path):
@@ -282,10 +269,10 @@ def _pip(args, cancel=None, env=None):
             del tail[:-20]
             if cancel and cancel():
                 proc.kill()
-                raise ComponentError("cancelled")
+                raise Cancelled()
         proc.wait()
         if cancel and cancel():
-            raise ComponentError("cancelled")
+            raise Cancelled()
         return proc.returncode, tail
     finally:
         _children.discard(proc)
@@ -325,7 +312,7 @@ def _unpacked_size(paths):
     return total
 
 
-def _install(packages, wheels, files, tmp, label, progress, cancel):
+def _install(packages, wheels, files, tmp, label, progress, cancel, args=()):
     """pip install from the downloaded wheels into ``tmp``, reporting progress by bytes written.
     pip unpacks into its temp folder first and then copies into the target, so the work is ~2x the size."""
     work = os.path.join(data_dir(), "downloads", "pip-tmp")
@@ -346,7 +333,7 @@ def _install(packages, wheels, files, tmp, label, progress, cancel):
     t.start()
     try:
         return _pip(["install", "--no-index", "--find-links", wheels, "--target", tmp, "--no-warn-script-location",
-                     "--quiet"] + packages, cancel, env=env)
+                     "--quiet"] + list(args) + packages, cancel, env=env)
     finally:
         done.set()
         t.join(5)
@@ -355,9 +342,8 @@ def _install(packages, wheels, files, tmp, label, progress, cancel):
 
 def _verify(name, folder, need_cuda=True):
     """Import a copy of the component in a separate Python.  Returns a problem or ''."""
-    if not COMPONENTS[name]["check"]:
-        return ""
-    code = ["import sys", "sys.path.insert(0, %r)" % folder] + ["import %s" % m for m in COMPONENTS[name]["check"]]
+    modules = COMPONENTS[name].get("verify", COMPONENTS[name]["check"])
+    code = ["import sys", "sys.path.insert(0, %r)" % folder] + ["import %s" % m for m in modules]
     if name == "speakers":
         code.append("from transformers import AutoModelForTDT, AutoProcessor")  # Parakeet support in this version
     if need_cuda and name == "speakers" and speakers_on_gpu():
@@ -390,65 +376,77 @@ def _swap(tmp, target, label):
     shutil.rmtree(old, ignore_errors=True)  # whatever is left is removed on the next start (activate)
 
 
+DOWNLOAD_SHARE = 0.6  # of one progress bar; installing is the rest (unpacking 3 GB of torch takes minutes)
+
+
+def _label(name):
+    t = COMPONENTS[name]["label"]
+    return t[:1].upper() + t[1:]
+
+
+def _download(name, packages, plan_args, wheels, progress, cancel):
+    """Wheels of the component into ``wheels``; returns their paths."""
+    items = _plan(packages, os.path.join(data_dir(), "downloads", "%s-plan.json" % name), cancel, plan_args)
+    try:
+        downloader.download_many(
+            [{"url": it["url"], "dest": os.path.join(wheels, it["name"]), "sha256": it["sha256"]} for it in items],
+            progress=progress, cancel=cancel, label=_label(name))
+    except downloader.DownloadError as e:
+        raise ComponentError("%s: %s" % (_label(name), e))
+    return [os.path.join(wheels, it["name"]) for it in items]
+
+
+def _install_verified(name, packages, install_args, wheels, files, progress, cancel):
+    """Installs into a fresh folder and puts it in place only when it imports fine."""
+    tmp = component_dir(name) + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    code, tail = _install(packages, wheels, files, tmp, _label(name), progress, cancel, install_args)
+    if code != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise ComponentError("Не вдалося встановити %s:\n%s" % (COMPONENTS[name]["label"], "\n".join(tail[-4:])))
+    if progress:
+        progress(0.98, "%s: перевірка…" % _label(name))
+    problem = _verify(name, tmp)
+    if problem:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise ComponentError("%s: встановлена копія не працює, попередню залишено без змін.\n%s" % (_label(name), problem))
+    _write_mark(tmp)  # just verified: the next start does not import torch again to check it
+    _swap(tmp, component_dir(name), _label(name))
+
+
+def _remove_wheels(wheels):
+    for f in os.listdir(wheels):
+        if f.endswith((".whl", ".tar.gz", ".zip")):
+            os.remove(os.path.join(wheels, f))
+
+
 def ensure(name, progress=None, cancel=None):
     """Download and install a component if it is missing.  Returns True if installed now."""
     if installed(name):
         return False
-    spec = COMPONENTS[name]
-    label = spec["label"][:1].upper() + spec["label"][1:]
-    wheels = os.path.join(data_dir(), "downloads", "wheels")
     target = component_dir(name)
+    wheels = os.path.join(data_dir(), "downloads", "wheels")
     with _lock:
         if installed(name):
             return False
         if os.path.isdir(target) and _loaded_from(target):
             # replacing it now would delete files of a library that is running; a fresh start does it cleanly
             raise ComponentError("%s: %s. Цю копію вже використано в поточній сесії, тому замінити її зараз не можна — "
-                                 "перезапустіть DaVinci Director." % (label, errors.get(name, "не завантажився")))
-        packages, extra = pip_spec(name)
+                                 "перезапустіть DaVinci Director." % (_label(name), errors.get(name, "не завантажився")))
+        packages, plan_args, install_args = pip_spec(name)
         os.makedirs(wheels, exist_ok=True)
         if progress:
-            progress(0.0, "%s: визначаю, що завантажити…" % label)
-        # one progress bar: download 0..60 %, installation 60..100 % (unpacking 3 GB of torch takes minutes)
-        dl_share = 0.6
+            progress(0.0, "%s: визначаю, що завантажити…" % _label(name))
 
-        def sub(a, b):
+        def share(a, b):
             return (lambda x, msg: progress(a + (b - a) * x, msg)) if progress else None
 
-        try:
-            items = _plan(packages, os.path.join(data_dir(), "downloads", "%s-plan.json" % name), cancel, extra)
-            downloader.download_many(
-                [{"url": it["url"], "dest": os.path.join(wheels, it["name"]), "sha256": it["sha256"]} for it in items],
-                progress=sub(0.0, dl_share), cancel=cancel, label=label)
-        except downloader.Cancelled:
-            raise ComponentError("cancelled")
-        except downloader.DownloadError as e:
-            raise ComponentError("%s: %s" % (label, e))
-        tmp = target + ".new"
-        shutil.rmtree(tmp, ignore_errors=True)
-        files = [os.path.join(wheels, it["name"]) for it in items]
-        code, tail = _install(packages, wheels, files, tmp, label, sub(dl_share, 0.97), cancel)
-        if code != 0:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise ComponentError("Не вдалося встановити %s:\n%s" % (spec["label"], "\n".join(tail[-4:])))
-        if progress:
-            progress(0.98, "%s: перевірка…" % label)
-        problem = _verify(name, tmp)
-        if problem:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise ComponentError("%s: встановлена копія не працює, попередню залишено без змін.\n%s" % (label, problem))
-        _write_mark(tmp)  # just verified: the next start does not import torch again to check it
-        _swap(tmp, target, label)
-        # the downloaded wheels are not needed any more
-        for f in os.listdir(wheels):
-            if f.endswith((".whl", ".tar.gz", ".zip")):
-                try:
-                    os.remove(os.path.join(wheels, f))
-                except OSError:
-                    pass
+        files = _download(name, packages, plan_args, wheels, share(0.0, DOWNLOAD_SHARE), cancel)
+        _install_verified(name, packages, install_args, wheels, files, share(DOWNLOAD_SHARE, 0.97), cancel)
+        _remove_wheels(wheels)
     activate()
     if progress:
-        progress(1.0, "%s: встановлено" % label)
+        progress(1.0, "%s: встановлено" % _label(name))
     return True
 
 

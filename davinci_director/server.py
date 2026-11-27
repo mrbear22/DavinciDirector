@@ -14,13 +14,14 @@ import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import __version__, stories, transcribe
+from . import Cancelled, __version__, stories, transcribe
 from .components import ComponentError
 from .engine import EditError
 from .link import LinkError, frame_to_tc
 from .storage import Settings
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+mimetypes.add_type("text/javascript", ".js")  # Windows may map .js to text/plain: modules would not load
 
 
 class ApiError(Exception):
@@ -50,6 +51,7 @@ class App:
         self.jobs = {}
         self.subscribers = []
         self.sub_lock = threading.Lock()
+        self.window_closed = self.quit_requested = False
         self.ph_moves = []  # [(time, frame)] of the last playhead changes: tells whether Resolve is playing
         engine.on(self._on_engine)
 
@@ -68,10 +70,7 @@ class App:
         if getattr(self, "_fast_ph", False) or not self.playback()["playing"]:
             return
         self._fast_ph = True
-        try:
-            self.link.set_preview(True)
-        except Exception:
-            pass
+        self.link.set_preview(True)
 
         def watch():
             while True:
@@ -80,10 +79,7 @@ class App:
                 if time.time() - last > 1.5:
                     break
             self._fast_ph = False
-            try:
-                self.link.set_preview(False)
-            except Exception:
-                pass
+            self.link.set_preview(False)
         threading.Thread(target=watch, daemon=True, name="dd-follow").start()
 
     # ------------------------------------------------------------ events
@@ -127,8 +123,7 @@ class App:
         return {"connected": bool(link.connected), "info": {k: v for k, v in (link.info or {}).items() if k != "timeline_header"},
                 "tracks": sorted(snap.get("tracks", {}).keys(), key=lambda k: (k[0] != "v", k)),
                 "track": self.engine.track, "errors": list(getattr(link, "errors", []))[-3:],
-                "check": snap.get("check") or [], "playhead": link.playhead,
-                "kind": type(link).__name__}
+                "check": snap.get("check") or [], "playhead": link.playhead}
 
     def undo_state(self):
         e = self.engine
@@ -162,16 +157,11 @@ class App:
                 fn(job)
                 if job.status == "running":
                     self.job_update(job, status="done", progress=1.0)
-            except (transcribe.Cancelled, ComponentError) as e:
-                if not isinstance(e, transcribe.Cancelled) and str(e) != "cancelled":
-                    self.job_update(job, status="error", message=str(e))
-                    return
+            except Cancelled:
                 self.job_update(job, status="cancelled", message="Скасовано")
-            except Exception as e:  # every failure is reported to the UI
+            except Exception as e:  # every failure is shown to the user
                 traceback.print_exc()
-                msg = str(e)
-                self.job_update(job, status="cancelled" if msg == "cancelled" else "error",
-                                message="Скасовано" if msg == "cancelled" else msg)
+                self.job_update(job, status="error", message=str(e))
 
         threading.Thread(target=run, daemon=True).start()
         return job.public()
@@ -299,18 +289,11 @@ class Handler(BaseHTTPRequestHandler):
         q = dict(urllib.parse.parse_qsl(url.query))
         try:
             if url.path == "/api/ping":
-                return self._json({"app": "davinci-director", "version": __version__,
-                                   "background": bool(getattr(self.app, "background", False))})
+                return self._json({"app": "davinci-director", "version": __version__})
             if url.path == "/api/state":
                 return self._json(self.app.state())
             if url.path == "/api/components":
-                from . import components, models
-                st = components.status(disk=bool(q.get("disk")))
-                from . import parakeet
-                st["models"] = [{"name": models.ASR, "available": bool(models.cached()), "label": parakeet.LABEL,
-                                 "credit": parakeet.CREDIT, "license": parakeet.LICENSE_URL, "size": "2,5 ГБ"}]
-                st["local_models"] = models.list_local()
-                return self._json(st)
+                return self._json(_components_state(bool(q.get("disk"))))
             if url.path == "/api/transcripts":
                 return self._json({"transcripts": self.app.engine.transcript_payload(), "tv": self.app.engine.tversion})
             if url.path == "/api/events":
@@ -361,54 +344,64 @@ class Handler(BaseHTTPRequestHandler):
         self._send(body, ctype)
 
     def _export(self, kind, q):
+        fn = getattr(self, "export_" + kind, None)
+        if not fn:
+            raise ApiError("Невідомий експорт", 404)
         e = self.app.engine
         base = re.sub(r"[^\w\-]+", "_", (e.view.get("tl") or e.project_name or "timeline"))[:60]
-        if kind == "estimate":
-            res = stories.export_for_claude(e, int(q.get("budget") or stories.TOKEN_BUDGET), q.get("only") == "1")
-            return self._json({"mode": res["mode"], "tokens": res["tokens"], "parts": len(res["files"]),
-                               "beats": len(e.project_state.get("beats") or []), "budget": stories.TOKEN_BUDGET,
-                               "brief": stories.get_brief(e),
-                               "topics_parts": len(stories.export_topics(e, int(q.get("budget") or stories.TOKEN_BUDGET),
-                                                                         q.get("only") == "1")),
-                               "topics": len(e.project_state.get("topics") or []),
-                               "durations": {k: [v[0], v[1], v[2]] for k, v in stories.DURATIONS.items()}})
-        if kind == "claude":
-            res = stories.export_for_claude(e, int(q.get("budget") or stories.TOKEN_BUDGET), q.get("only") == "1")
-            if q.get("raw") == "1":
-                return self._send(res["files"][int(q.get("part") or 1) - 1][1], "text/plain; charset=utf-8")
-            if len(res["files"]) == 1:
-                name, text = res["files"][0]
-                return self._send(text, "text/plain; charset=utf-8", headers={"Content-Disposition": _disp(name)})
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                for name, text in res["files"]:
-                    z.writestr(name, text)
-            return self._send(buf.getvalue(), "application/zip", headers={"Content-Disposition": _disp("%s.prompt-parts.zip" % base)})
-        if kind == "topics":
-            files = stories.export_topics(e, int(q.get("budget") or stories.TOKEN_BUDGET), q.get("only") == "1")
-            name, text = files[int(q.get("part") or 1) - 1]
-            if q.get("raw") == "1":
-                return self._send(text, "text/plain; charset=utf-8")
-            return self._send(text, "text/plain; charset=utf-8", headers={"Content-Disposition": _disp(name)})
-        if kind == "stage2":
-            name, text = stories.export_stage2(e)
-            if q.get("raw") == "1":
-                return self._send(text, "text/plain; charset=utf-8")
-            return self._send(text, "text/plain; charset=utf-8", headers={"Content-Disposition": _disp(name)})
-        if kind == "schema":
-            body = json.dumps({"rules": stories.RULES, "answer_format": stories.ANSWER_SCHEMA},
-                              ensure_ascii=False, indent=2)
-            return self._send(body, headers={"Content-Disposition": _disp("dd-stories-schema.json")})
-        if kind == "srt":
-            return self._send(edit_text(e, srt=True), "application/x-subrip; charset=utf-8",
-                              headers={"Content-Disposition": _disp("%s.srt" % base)})
-        if kind == "txt":
-            return self._send(edit_text(e), "text/plain; charset=utf-8", headers={"Content-Disposition": _disp("%s.txt" % base)})
-        if kind == "story":
-            s = stories.find_story(e, q.get("uid"))
-            return self._send(json.dumps({"format": stories.STORIES_FORMAT, "stories": [s]}, ensure_ascii=False, indent=2),
-                              headers={"Content-Disposition": _disp("%s.story.json" % base)})
-        raise ApiError("Невідомий експорт", 404)
+        return fn(e, q, base)
+
+    def _text(self, name, text, q, ctype="text/plain; charset=utf-8"):
+        """``raw=1``: for copying from the page; otherwise a file to save."""
+        if q.get("raw") == "1":
+            return self._send(text, "text/plain; charset=utf-8")
+        return self._send(text, ctype, headers={"Content-Disposition": _disp(name)})
+
+    @staticmethod
+    def _budget(q):
+        return int(q.get("budget") or stories.TOKEN_BUDGET), q.get("only") == "1"
+
+    def export_estimate(self, e, q, base):
+        res = stories.export_for_claude(e, *self._budget(q))
+        return self._json({"mode": res["mode"], "tokens": res["tokens"], "parts": len(res["files"]),
+                           "beats": len(e.project_state.get("beats") or []), "budget": stories.TOKEN_BUDGET,
+                           "brief": stories.get_brief(e), "topics_parts": len(stories.export_topics(e, *self._budget(q))),
+                           "topics": len(e.project_state.get("topics") or []),
+                           "durations": {k: list(v[:3]) for k, v in stories.DURATIONS.items()}})
+
+    def export_claude(self, e, q, base):
+        files = stories.export_for_claude(e, *self._budget(q))["files"]
+        if q.get("raw") == "1":
+            return self._send(files[int(q.get("part") or 1) - 1][1], "text/plain; charset=utf-8")
+        if len(files) == 1:
+            return self._text(files[0][0], files[0][1], q)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, text in files:
+                z.writestr(name, text)
+        return self._send(buf.getvalue(), "application/zip", headers={"Content-Disposition": _disp("%s.prompt-parts.zip" % base)})
+
+    def export_topics(self, e, q, base):
+        name, text = stories.export_topics(e, *self._budget(q))[int(q.get("part") or 1) - 1]
+        return self._text(name, text, q)
+
+    def export_stage2(self, e, q, base):
+        return self._text(*stories.export_stage2(e), q)
+
+    def export_schema(self, e, q, base):
+        body = json.dumps({"rules": stories.RULES, "answer_format": stories.ANSWER_SCHEMA}, ensure_ascii=False, indent=2)
+        return self._text("dd-stories-schema.json", body, q, "application/json; charset=utf-8")
+
+    def export_srt(self, e, q, base):
+        return self._text("%s.srt" % base, edit_text(e, srt=True), q, "application/x-subrip; charset=utf-8")
+
+    def export_txt(self, e, q, base):
+        return self._text("%s.txt" % base, edit_text(e), q)
+
+    def export_story(self, e, q, base):
+        body = json.dumps({"format": stories.STORIES_FORMAT, "stories": [stories.find_story(e, q.get("uid"))]},
+                          ensure_ascii=False, indent=2)
+        return self._text("%s.story.json" % base, body, q, "application/json; charset=utf-8")
 
     def do_POST(self):
         if not self._local_only():
@@ -524,13 +517,9 @@ class Handler(BaseHTTPRequestHandler):
         from . import components, models
 
         def run(job):
-            components.ensure("whisper", lambda x, m: self.app.job_update(job, progress=x, message=m),
-                              cancel=lambda: job.cancelled)  # needs huggingface_hub
-            try:
-                models.ensure_asr(lambda x, m: self.app.job_update(job, progress=x, message=m),
-                                  cancel=lambda: job.cancelled)
-            except models.ModelError as e:
-                raise ComponentError(str(e))
+            progress = lambda x, m: self.app.job_update(job, progress=x, message=m)  # noqa: E731
+            components.ensure("speakers", progress, cancel=lambda: job.cancelled)  # brings huggingface_hub
+            models.ensure_asr(progress, cancel=lambda: job.cancelled)
         return self.app.start_job("download", "Завантаження моделі", run)
 
     def post_cancel(self, b):
@@ -547,9 +536,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def post_speaker_rename(self, b):
         self.app.engine.rename_speaker(b["m"], b["sid"], b["name"])
-
-    def post_fragment_speaker(self, b):
-        self.app.engine.set_fragment_speaker(b["m"], int(b["f"]), b["sid"])
 
     def post_words_speaker(self, b):
         self.app.engine.set_words_speaker(b.get("ranges") or [], b["sid"])
@@ -580,8 +566,7 @@ class Handler(BaseHTTPRequestHandler):
         return stories.apply_scene(self.app.engine, b["uid"], b["scene"], b.get("where", "playhead"))
 
     def post_window_closed(self, b):
-        """The user closed the window: stop everything it started (the main loop then exits or, in the
-        background mode, restarts as an idle watcher that holds no models)."""
+        """The user closed the window: stop everything it started (the app restarts as an idle watcher)."""
         self.app.stop_all_jobs()
         self.app.window_closed = True
 
@@ -591,6 +576,15 @@ class Handler(BaseHTTPRequestHandler):
     def post_settings(self, b):
         self.app.settings.update(b)
         return self.app.settings.public()
+
+
+def _components_state(disk):
+    from . import components, models, parakeet
+    st = components.status(disk=disk)
+    st["models"] = [{"name": models.ASR, "available": models.available(), "label": parakeet.LABEL,
+                     "credit": parakeet.CREDIT, "license": parakeet.LICENSE_URL, "size": "2,5 ГБ"}]
+    st["local_models"] = models.list_local()
+    return st
 
 
 def _disp(name):

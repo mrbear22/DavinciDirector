@@ -2,15 +2,11 @@
 """Build the DaVinci Director installer for Windows.
 
     python build.py                # -> dist\\DaVinciDirector-Setup-<version>.exe
-    python build.py --skip-tests
 
-The installer is small (~15 MB): the official embeddable Python from python.org,
-pip, pywebview (the program's native WebView2 window) and the app code.  No libraries are bundled — the program downloads what it
-needs while it runs, into %LOCALAPPDATA%\\DaVinciDirector\\components:
-  * Whisper engine (faster-whisper, CTranslate2) with PyAV/FFmpeg — first transcription;
-  * NVIDIA CUDA libraries — only with an NVIDIA GPU and "прискорення" on;
-  * pyannote + torch — only when speaker detection is used.
-Whisper/pyannote models are downloaded by those libraries on first use.
+The installer is small (~15 MB): the official embeddable Python from python.org, pip,
+pywebview (the program's native WebView2 window) and the app code.  Everything else the program
+downloads on the first transcription into the components and models folders of the program:
+audio (PyAV, Silero VAD), neural networks (torch, transformers, pyannote), the Parakeet model.
 
 The build downloads (once, cached in build\\cache):
   * python-<ver>-embed-amd64.zip  — python.org, ~11 MB;
@@ -127,9 +123,7 @@ def stage_app():
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--skip-tests", action="store_true")
-    args = ap.parse_args()
+    argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
     if not sys.platform.startswith("win"):
         fail("збірка підтримується лише у Windows")
     try:
@@ -138,11 +132,6 @@ def main():
         pass
     ver = version()
     t0 = time.time()
-
-    if not args.skip_tests:
-        step("Тести")
-        if subprocess.call([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=HERE) != 0:
-            fail("тести не пройшли (запустіть з --skip-tests, щоб зібрати все одно)")
 
     shutil.rmtree(STAGE, ignore_errors=True)
     py_dir = stage_python()
@@ -171,8 +160,7 @@ def main():
         fail("Inno Setup завершився з помилкою")
     out = os.path.join(DIST, base + ".exe")
     print("\nГотово за %d с: %s (%.1f МБ)" % (time.time() - t0, out, os.path.getsize(out) / 1e6))
-    print("Інсталятор без прав адміністратора; компоненти (Whisper/FFmpeg, CUDA, pyannote) і моделі\n"
-          "програма завантажує сама, коли вони вперше потрібні.")
+    print("Інсталятор без прав адміністратора; компоненти й модель програма завантажує сама під час першої транскрипції.")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,5 @@
 __pycache__/
 *.pyc
 .venv/
-.pytest_cache/
-DaVinci Director.cmd
-davinci-director.sh
 dist/
 build/

@@ -1,2 +1,1 @@
-faster-whisper>=1.1
-numpy>=1.24
+pywebview>=5

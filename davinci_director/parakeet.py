@@ -7,15 +7,16 @@ Inference the way the model card does it: Transformers ``AutoProcessor`` + ``Aut
 torch.  Word timestamps come from the TDT token durations (``processor.decode(..., durations=...)``).
 
 Long recordings: the model was trained on 1–20 s clips, so the audio is cut into chunks of at most
-~20 s.  Cuts are made in pauses found by the Silero VAD; a stretch of speech longer than that is cut at
+~20 s.  Cuts are made in pauses found by the Silero VAD (ONNX, from the "audio" component); a stretch of speech longer than that is cut at
 its quietest 20 ms frame and both neighbours get 0.5 s of overlap.  Every chunk owns a "core" interval;
 the cores partition the timeline without gaps, and a recognised word is kept only by the chunk whose core
 contains the word's middle.  So a word at a boundary is neither lost (the overlap gives both chunks the
 whole word) nor duplicated (only one core contains its middle).
 """
 
-import gc
 import os
+
+from . import Cancelled
 
 REPO = "ihnatov-yuri/parakeet-tdt-0.6b-v3-uk"
 NAME = "parakeet-tdt-0.6b-v3-uk"
@@ -36,16 +37,19 @@ class AsrError(Exception):
     pass
 
 
-class Cancelled(Exception):
-    pass
-
-
 # ------------------------------------------------------------------ chunking (numpy only)
 
+_vad = []
+
+
 def speech_regions(audio):
-    """[(start, end)] in samples where someone speaks (Silero VAD, as shipped with faster-whisper)."""
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
-    regs = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=200))
+    """[(start, end)] in samples where someone speaks (Silero VAD)."""
+    import torch
+    from silero_vad import get_speech_timestamps, load_silero_vad
+    if not _vad:
+        _vad.append(load_silero_vad(onnx=True))  # ONNX: ~2x faster than its torch version on the processor
+    regs = get_speech_timestamps(torch.from_numpy(audio), _vad[0], sampling_rate=SR,
+                                 min_silence_duration_ms=500, speech_pad_ms=200)
     return [(int(r["start"]), int(r["end"])) for r in regs]
 
 
@@ -122,83 +126,55 @@ def tokens_to_words(tokens, offset):
 # ------------------------------------------------------------------ model
 
 _state = {}  # path, device, dtype, processor, model
+OOM_TEXTS = ("out of memory", "not enough memory")
 
 
-class _NoRuntime(Exception):
-    pass
+def _is_oom(e):
+    return isinstance(e, MemoryError) or type(e).__name__ == "OutOfMemoryError" or \
+        any(t in str(e).lower() for t in OOM_TEXTS)
 
 
 def _load(path, device):
-    try:
-        import torch
-        from transformers import AutoModelForTDT, AutoProcessor
-    except (ImportError, OSError) as e:  # OSError: a torch DLL failed to load
-        raise _NoRuntime(e)
+    import torch
+    from transformers import AutoModelForTDT, AutoProcessor
     dtype = torch.float16 if device == "cuda" else torch.float32
     proc = AutoProcessor.from_pretrained(path)
     model = AutoModelForTDT.from_pretrained(path, dtype=dtype).to(device).eval()
     _state.update(path=path, device=device, dtype=dtype, processor=proc, model=model)
 
 
-def load(path, use_gpu=True, log=None):
-    """Load once and keep it for the next transcriptions (GPU if available and wanted)."""
-    if _state.get("path") == path and (_state.get("device") == "cuda") == bool(use_gpu and _cuda()):
-        return _state["device"]
+def load(path, device=None, log=None):
+    """Load once and keep it for the next transcriptions: on the graphics card when there is one
+    (and it has the memory), otherwise on the processor."""
+    import torch
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if _state.get("path") == path and _state.get("device") == device:
+        return
     release()
-    device = "cuda" if use_gpu and _cuda() else "cpu"
     try:
         _load(path, device)
-    except _NoRuntime as e:
-        raise AsrError("Не вдалося запустити рушій розпізнавання (torch/transformers): %s. "
-                       "Видаліть компонент «нейромережі» у «Компоненти й моделі» — програма встановить його знову."
-                       % e.args[0])
     except Exception as e:
         if device == "cuda" and _is_oom(e):
-            release()
             if log:
                 log("Не вистачило пам'яті відеокарти для моделі розпізнавання — працюю на процесорі (повільніше).")
-            device = "cpu"
-            try:
-                _load(path, device)
-            except Exception as e2:
-                raise _load_error(e2)
-        else:
-            raise _load_error(e)
-    return device
-
-
-def _cuda():
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except Exception:
-        return False
-
-
-def _is_oom(e):
-    import torch
-    return isinstance(e, (torch.cuda.OutOfMemoryError, MemoryError)) or "out of memory" in str(e).lower()
-
-
-def _load_error(e):
-    if isinstance(e, MemoryError) or "out of memory" in str(e).lower() or "not enough memory" in str(e).lower():
-        return AsrError("Не вистачає оперативної пам'яті, щоб завантажити модель розпізнавання (потрібно ~3 ГБ вільної). "
-                        "Закрийте інші програми й спробуйте ще раз.")
-    return AsrError("Не вдалося завантажити модель %s: %s. Якщо файли пошкоджені, видаліть модель у "
-                    "«Компоненти й моделі» — програма завантажить її знову." % (LABEL, e))
+            release()
+            return load(path, "cpu", log)
+        if _is_oom(e):
+            raise AsrError("Не вистачає оперативної пам'яті, щоб завантажити модель розпізнавання (потрібно ~3 ГБ "
+                           "вільної). Закрийте інші програми й спробуйте ще раз.")
+        raise AsrError("Не вдалося завантажити модель %s: %s. Якщо файли пошкоджені, видаліть модель у "
+                       "«Компоненти й моделі» — програма завантажить її знову." % (LABEL, e))
 
 
 def release():
     """Free the model (and its GPU memory), e.g. before speaker detection."""
+    import gc
+    import sys
     _state.clear()
     gc.collect()
-    try:
-        import sys
-        torch = sys.modules.get("torch")
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _recognize(x):
@@ -211,10 +187,25 @@ def _recognize(x):
     return [(d["token"], d["start"], d["end"]) for d in stamps[0]]
 
 
-def transcribe(audio, path, use_gpu=True, progress=None, cancel=None, log=None):
+def _recognize_chunk(x, at, log):
+    """Tokens of one chunk; when the graphics card runs out of memory, the rest goes on the processor."""
+    try:
+        return _recognize(x)
+    except Exception as e:
+        if not _is_oom(e):
+            raise AsrError("Помилка розпізнавання на %d:%02d: %s" % (at // 60, at % 60, e))
+        if _state.get("device") != "cuda":
+            raise AsrError("Не вистачає оперативної пам'яті для розпізнавання. Закрийте інші програми й спробуйте ще раз.")
+    if log:
+        log("Не вистачило пам'яті відеокарти — розпізнавання продовжується на процесорі (повільніше).")
+    load(_state["path"], "cpu", log)
+    return _recognize(x)
+
+
+def transcribe(audio, path, progress=None, cancel=None, log=None):
     """16 kHz mono float32 audio -> [{"t0","t1","w","p"}] (seconds from the start of ``audio``).
     ``p`` is always 1.0: the model gives no per-word confidence through Transformers."""
-    load(path, use_gpu, log)
+    load(path, log=log)
     if not len(audio):
         return []
     chunks = plan_chunks(audio, speech_regions(audio))
@@ -223,24 +214,9 @@ def transcribe(audio, path, use_gpu=True, progress=None, cancel=None, log=None):
         if cancel and cancel():
             raise Cancelled()
         x = audio[ch["a"]:ch["b"]]
-        if len(x) < SR // 10:  # nothing a model could read
-            continue
-        try:
-            toks = _recognize(x)
-        except Exception as e:
-            if _state.get("device") == "cuda" and _is_oom(e):
-                if log:
-                    log("Не вистачило пам'яті відеокарти — розпізнавання продовжується на процесорі (повільніше).")
-                load_path = _state["path"]
-                release()
-                load(load_path, False, log)
-                toks = _recognize(x)
-            elif isinstance(e, MemoryError):
-                raise AsrError("Не вистачає оперативної пам'яті для розпізнавання. Закрийте інші програми й спробуйте ще раз.")
-            else:
-                raise AsrError("Помилка розпізнавання на %d:%02d: %s" % (ch["a"] // SR // 60, ch["a"] // SR % 60, e))
-        got = tokens_to_words(toks, ch["a"] / SR)
-        words += keep_core(got, ch["c0"] / SR, ch["c1"] / SR)
+        if len(x) >= SR // 10:  # shorter: nothing a model could read
+            toks = _recognize_chunk(x, ch["a"] // SR, log)
+            words += keep_core(tokens_to_words(toks, ch["a"] / SR), ch["c0"] / SR, ch["c1"] / SR)
         if progress:
             progress((i + 1) / len(chunks))
     return words

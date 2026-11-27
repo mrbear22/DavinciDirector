@@ -5,166 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DaVinci Director</title>
 <link rel="stylesheet" href="app.css">
+<link rel="icon" href="icon.png">
 </head>
 <body>
-<div id="app">
-  <!-- ============================================================ header -->
-  <header id="topbar">
-    <div class="brand"><span class="logo">◆</span> DaVinci Director</div>
-    <div class="crumbs" id="crumbs"><span class="dim">Не підключено</span></div>
-    <div class="tb-group">
-      <button id="btn-connect" class="tb" title="Перечитати поточний таймлайн Resolve">⟲ Таймлайн</button>
-      <button id="btn-transcribe" class="tb">🎙 Транскрибувати</button>
-    </div>
-    <div class="tb-group">
-      <button id="btn-undo" class="tb icon" title="Скасувати (Ctrl+Z)">↶</button>
-      <button id="btn-redo" class="tb icon" title="Повторити (Ctrl+Shift+Z)">↷</button>
-    </div>
-    <div class="spacer"></div>
-    <div class="tb-group">
-      <label class="tb check" title="Автоматично оновлювати монтажний таймлайн після кожної зміни"><input type="checkbox" id="chk-autosync"> Автосинхр.</label>
-      <button id="btn-sync" class="tb" title="Створити / оновити монтажний таймлайн у DaVinci Resolve">▸ На таймлайн Resolve</button>
-    </div>
-    <button id="btn-analyze" class="tb accent" title="Передати транскрипцію Claude для пошуку сюжетів">✦ Знайти сюжети з Claude</button>
-    <button id="btn-settings" class="tb icon" title="Налаштування">⚙</button>
-  </header>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-undo" viewBox="0 0 16 16"><path d="M5 4 2 7l3 3M2.5 7H10a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 16 16"><path d="m11 4 3 3-3 3M13.5 7H6a3.5 3.5 0 0 0 0 7h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 16 16"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-out" viewBox="0 0 16 16"><path d="M8 10V2M5 5l3-3 3 3M3 10v3.5h10V10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-in" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3M3 10v3.5h10V10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 16 16"><path d="M13 6.5A5 5 0 0 0 3.6 5M3 9.5A5 5 0 0 0 12.4 11M3.5 2v3h3M12.5 14v-3h-3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="13" cy="8" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-grip" viewBox="0 0 16 16"><g fill="currentColor"><circle cx="6" cy="4" r="1"/><circle cx="10" cy="4" r="1"/><circle cx="6" cy="8" r="1"/><circle cx="10" cy="8" r="1"/><circle cx="6" cy="12" r="1"/><circle cx="10" cy="12" r="1"/></g></symbol>
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.5v9l7-4.5z" fill="currentColor"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7v4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="4.8" r=".9" fill="currentColor"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-follow" viewBox="0 0 16 16"><path d="M8 1.5v13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M4.5 1.5h7L8 5.5z" fill="currentColor"/></symbol>
+  <symbol id="i-bins" viewBox="0 0 16 16"><path d="M1.5 4.5h4l1.2 1.5h7.8v7.5h-13z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M3.5 2.5h3l1 1.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-story" viewBox="0 0 16 16"><rect x="1.5" y="3" width="13" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.5 6h13M5 3v3M9 3v3M12.5 3v3" stroke="currentColor" stroke-width="1.2"/><path d="m6.5 8.2v3l2.8-1.5z" fill="currentColor"/></symbol>
+  <symbol id="i-people" viewBox="0 0 16 16"><circle cx="5.5" cy="5.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1.5 13.5c.4-2.3 2-3.6 4-3.6s3.6 1.3 4 3.6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="11.3" cy="6" r="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M11 9.9c1.8 0 3.1 1.2 3.5 3.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-text" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 7h11M2.5 10h11M2.5 13h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-logo" viewBox="0 0 16 16"><path d="M2.5 3h6.5a5 5 0 0 1 0 10H2.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M6 6.2v3.6l3-1.8z" fill="currentColor"/></symbol>
+</svg>
 
-  <!-- ============================================================ main -->
-  <main id="main">
-    <!-- left column -->
-    <section id="left" class="col">
-      <div class="panel viewer-panel">
-        <div class="panel-title"><span>В'ювер</span>
-          <div class="pt-tools">
-            <label class="mini check" title="Відтворювати в порядку монтажу, пропускаючи вирізане"><input type="checkbox" id="chk-playedit" checked> Монтаж</label>
-          </div>
-        </div>
-        <div class="viewer">
-          <video id="video" preload="metadata" playsinline></video>
-          <div id="viewer-msg" class="viewer-msg hidden"></div>
-        </div>
-        <div class="transport">
-          <button id="v-prev" class="tbtn" title="Попередній фрагмент">⏮</button>
-          <button id="v-play" class="tbtn" title="Відтворення (Пробіл)">▶</button>
-          <button id="v-next" class="tbtn" title="Наступний фрагмент">⏭</button>
-          <div class="tc-box"><div id="tc-src" class="tc" title="Час в оригіналі">00:00:00.0</div><div id="tc-edit" class="tc dim" title="Час у монтажі">00:00:00.0</div></div>
-          <label class="mini check" title="Клік по слову переміщує плейхед у Resolve"><input type="checkbox" id="chk-clickjump" checked> → Resolve</label>
-          <label class="mini check" title="Підсвічувати слово під плейхедом Resolve"><input type="checkbox" id="chk-follow" checked> Слідкувати</label>
-        </div>
-      </div>
-      <div class="panel grow">
-        <div class="tabs" data-tabs="left">
-          <button class="tab active" data-tab="speakers">Мовці</button>
-          <button class="tab" data-tab="outline">Фрагменти</button>
-          <button class="tab" data-tab="search">Пошук</button>
-        </div>
-        <div class="tab-body active" data-body="speakers">
-          <div id="speakers" class="list"></div>
-          <div class="list-foot"><button id="btn-add-speaker" class="btn sm">＋ Мовець</button><span class="dim small">Подвійний клік — перейменувати</span></div>
-        </div>
-        <div class="tab-body" data-body="outline"><div id="outline" class="list"></div></div>
-        <div class="tab-body" data-body="search">
-          <div class="search-head">
-            <input id="search-input2" class="inp" placeholder="Слово або фраза…">
-          </div>
-          <div id="search-summary" class="small dim pad"></div>
-          <div id="search-results" class="list"></div>
-          <div class="list-foot"><button id="btn-cut-matches" class="btn sm" disabled>Вирізати всі збіги</button><button id="btn-restore-matches" class="btn sm" disabled>Відновити</button></div>
-        </div>
-      </div>
-    </section>
-    <div class="splitter" data-split="left"></div>
-
-    <!-- center column -->
-    <section id="center" class="col">
-      <div class="panel grow">
-        <div class="panel-title editor-title">
-          <span>Транскрипція / текстовий монтаж</span>
-          <div class="pt-tools">
-            <div class="searchbox"><input id="search-input" class="inp sm" placeholder="Пошук (Ctrl+F)"><span id="search-count" class="dim small"></span><button id="search-prev" class="tbtn sm">‹</button><button id="search-next" class="tbtn sm">›</button></div>
-            <div class="dropdown">
-              <button class="btn sm" data-dd>Вигляд ▾</button>
-              <div class="dd-menu">
-                <label><input type="checkbox" id="opt-showcut" checked> Показувати вирізане</label>
-                <label><input type="checkbox" id="opt-gaps" checked> Показувати паузи</label>
-                <label><input type="checkbox" id="opt-times" checked> Таймкоди фрагментів</label>
-                <label><input type="checkbox" id="opt-conf" checked> Підсвічувати сумнівні слова</label>
-              </div>
-            </div>
-            <div class="dropdown">
-              <button class="btn sm" data-dd>Інструменти ▾</button>
-              <div class="dd-menu">
-                <button data-cmd="remove-pauses">Скоротити паузи довші за 2 с</button>
-                <button data-cmd="remove-pauses-5">Скоротити паузи довші за 5 с</button>
-                <button data-cmd="cut-fillers">Вирізати слова-паразити…</button>
-                <hr>
-                <button data-cmd="export-srt">Експорт субтитрів монтажу (SRT)</button>
-                <button data-cmd="export-txt">Експорт тексту монтажу (TXT)</button>
-                <button data-cmd="export-edl">Експорт EDL (резерв)</button>
-                <button data-cmd="export-src-srt">Експорт субтитрів оригіналу (SRT)</button>
-                <hr>
-                <button data-cmd="reset-edit" class="danger">Скинути монтаж до оригіналу</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div id="editor-wrap">
-          <div id="editor" tabindex="0" spellcheck="false"></div>
-          <div id="editor-empty" class="empty">
-            <div class="empty-inner">
-              <div class="empty-icon">◆</div>
-              <div id="empty-text">Додайте відеозапис стріму на таймлайн DaVinci Resolve, відкрийте аддон і запустіть транскрибування.</div>
-              <button id="btn-empty-transcribe" class="btn primary">🎙 Транскрибувати таймлайн</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-    <div class="splitter" data-split="right"></div>
-
-    <!-- right column -->
-    <section id="right" class="col">
-      <div class="panel grow">
-        <div class="tabs" data-tabs="right">
-          <button class="tab active" data-tab="stories">Сюжети</button>
-          <button class="tab" data-tab="chat">Claude <span id="chat-badge" class="badge hidden">•</span></button>
-          <button class="tab" data-tab="moments">Моменти</button>
-        </div>
-        <div class="tab-body active" data-body="stories"><div id="stories" class="scroll"></div></div>
-        <div class="tab-body chat-body" data-body="chat">
-          <div id="chat-log" class="scroll"></div>
-          <div class="chat-quick" id="chat-quick"></div>
-          <div class="chat-input">
-            <textarea id="chat-text" class="inp" rows="3" placeholder="Попросіть Claude: знайти кращий початок, скоротити частину, написати закадровий текст… (Ctrl+Enter)"></textarea>
-            <div class="chat-actions"><button id="chat-clear" class="btn sm ghost" title="Очистити розмову">Очистити</button><button id="chat-send" class="btn primary sm">Надіслати</button></div>
-          </div>
-        </div>
-        <div class="tab-body" data-body="moments"><div id="moments" class="scroll"></div></div>
-      </div>
-    </section>
-  </main>
-
-  <!-- ============================================================ overview -->
-  <div id="overview">
-    <div class="ov-label"><div id="ov-dur-edit" class="tc">00:00</div><div id="ov-dur-src" class="small dim">з 00:00</div></div>
-    <canvas id="ov-canvas"></canvas>
+<!-- interface toolbar: panel switches like Resolve's Media Pool / Effects / Index, project name on the right -->
+<header class="ifbar">
+  <button class="if-btn" id="tglOutline" title="Показати / сховати структуру таймлайна"><svg><use href="#i-bins"/></svg><span>Структура</span></button>
+  <span class="if-sep"></span>
+  <button class="if-btn" id="tglText" title="Текст таймлайна" disabled><svg><use href="#i-text"/></svg><span>Текст</span></button>
+  <span class="if-sep"></span>
+  <button class="if-btn" id="tglStories" data-side="stories" title="Сюжети від мовної моделі"><svg><use href="#i-story"/></svg><span>Сюжети</span></button>
+  <button class="if-btn" id="tglSpeakers" data-side="speakers" title="Мовці"><svg><use href="#i-people"/></svg><span>Мовці</span></button>
+  <div class="spacer"></div>
+  <div class="conn" id="conn" title="">
+    <span class="dot" id="connDot"></span>
+    <span class="conn-text" id="connText">Очікування Resolve…</span>
   </div>
+</header>
 
-  <!-- ============================================================ status -->
-  <footer id="statusbar">
-    <div id="status-msg" class="grow"></div>
-    <div id="jobs"></div>
-    <div id="sync-state" class="sb-item"></div>
-    <div id="resolve-state" class="sb-item"></div>
-  </footer>
-</div>
+<main class="workspace">
+ <div class="main-col">
+  <div class="top-row">
+  <aside class="panel outline-panel" id="pnlOutline">
+    <div class="panel-head"><svg><use href="#i-bins"/></svg><div class="panel-title">Структура</div><span class="muted ol-sum" id="outlineSum"></span></div>
+    <div class="outline" id="outline"></div>
+  </aside>
 
-<!-- ============================================================ overlays -->
-<div id="ctxmenu" class="ctxmenu hidden"></div>
-<div id="toasts"></div>
-<div id="modal-back" class="hidden"><div id="modal" class="modal"></div></div>
-<input id="word-editor" class="word-editor hidden">
+  <section class="panel editor-panel">
+    <!-- toolbar row, like the one above Resolve's timeline -->
+    <div class="toolbar">
+      <button class="tb text" id="btnTranscribe" title="Розпізнати мову в кліпах доріжки"><svg><use href="#i-mic"/></svg><span>Транскрибувати</span></button>
+      <button class="tb text" id="btnExport" title="Експорт для Claude: запит для мовної моделі (сюжети, теми)"><svg><use href="#i-out"/></svg><span>Експорт</span></button>
+      <button class="tb text" id="btnImport" title="Імпорт сюжетів: вставити відповідь мовної моделі"><svg><use href="#i-in"/></svg><span>Імпорт</span></button>
+      <span class="tb-sep"></span>
+      <button class="tb" id="btnUndo" title="Скасувати (Ctrl+Z)" disabled><svg><use href="#i-undo"/></svg></button>
+      <button class="tb" id="btnRedo" title="Повторити (Ctrl+Shift+Z)" disabled><svg><use href="#i-redo"/></svg></button>
+      <span class="tb-sep"></span>
+      <button class="tb" id="btnRefresh" title="Перечитати таймлайн з Resolve"><svg><use href="#i-sync"/></svg></button>
+      <button class="tb" id="btnFollow" title="Слідкувати за плейхедом Resolve"><svg><use href="#i-follow"/></svg></button>
+      <button class="tb" id="btnMore" title="Інше: субтитри, текст монтажу, компоненти й моделі…"><svg><use href="#i-more"/></svg></button>
+      <div class="spacer"></div>
+      <div class="search">
+        <svg><use href="#i-search"/></svg>
+        <input id="searchInput" type="search" placeholder="Пошук (Ctrl+F)" autocomplete="off" spellcheck="false">
+        <span class="search-count" id="searchCount"></span>
+        <button class="mini" id="searchPrev" title="Попередній (Shift+Enter)">&#8249;</button>
+        <button class="mini" id="searchNext" title="Наступний (Enter)">&#8250;</button>
+        <label class="chk" title="Шукати також у вирізаних словах"><input type="checkbox" id="searchCut"><span>у вирізаному</span></label>
+      </div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="editor" id="editor" tabindex="0" spellcheck="false"></div>
+  </section>
+  </div>
+  <!-- the timeline at the bottom, under the structure and the text, like in Resolve:
+       timecode + track header on the left, the ruler with clips on the right -->
+  <div class="tl-head">
+    <div class="tl-left">
+      <div class="tc-big" id="tcBig">--:--:--:--</div>
+      <div class="trk">
+        <label class="trk-badge" title="Доріжка, яку редагує текст"><select id="trackSel"></select></label>
+        <div class="trk-info"><span class="trk-name" id="tlName"></span><span class="trk-sub" id="trkSub"></span></div>
+      </div>
+    </div>
+    <div class="tl-right"><div class="overview" id="overview" title="Таймлайн у Resolve: клік — перейти"></div></div>
+  </div>
+ </div>
 
+  <aside class="panel side-panel" id="pnlSide">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="stories" role="tab">Сюжети</button>
+      <button class="tab" data-tab="speakers" role="tab">Мовці</button>
+    </div>
+    <div class="tab-body" id="tab-stories"></div>
+    <div class="tab-body hidden" id="tab-speakers"></div>
+  </aside>
+</main>
+
+<!-- bottom bar, like Resolve's page bar: name on the left, status in the middle -->
+<footer class="pagebar">
+  <div class="pb-brand"><img src="icon.png" alt=""><span>DaVinci Director</span></div>
+  <div class="pb-status">
+    <span id="statusSel">—</span>
+    <span class="sep"></span>
+    <span id="statusEdit"></span>
+  </div>
+  <div class="pb-job" id="statusJob"></div>
+</footer>
+
+<div class="menu hidden" id="ctxMenu" role="menu"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="modal-back hidden" id="modalBack"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+<input type="file" id="fileInput" accept=".json,.txt,application/json" class="hidden">
 <script src="app.js"></script>
 </body>
 </html>

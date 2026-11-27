@@ -1,16 +1,126 @@
-"""Persistent storage: projects, settings, caches (~/.davinci_director)."""
+"""Persistent storage: projects, settings, caches.
+
+Everything the program keeps lives in ONE folder — the one chosen in the installer (by default next to
+DaVinci Resolve's own user files):
+
+    %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\DaVinci Director\\   (or the chosen folder)
+        app\\, python\\        the program (installer)
+        data\\                settings, projects, transcripts, logs, caches
+        components\\          downloaded libraries (audio, torch/transformers/pyannote)
+        models\\, hf\\         speech-recognition and speaker-detection models
+        downloads\\           partial downloads (resumable)
+
+Libraries that would otherwise write into the user profile (Hugging Face cache, pip cache, matplotlib,
+torch) are pointed into this folder by ``setup_env``.  The only things outside it: the exchange folder
+with the Resolve script in %TEMP% (Resolve's script sandbox can write nowhere else) and the autostart
+entry in the registry.
+"""
 
 import json
 import os
 import re
+import shutil
 import threading
 import time
 
 
+def installed_root(pkg_dir=None):
+    """The folder the user chose in the installer: <root>\\app\\davinci_director\\ next to <root>\\python\\."""
+    pkg_dir = pkg_dir or os.path.dirname(os.path.abspath(__file__))
+    app = os.path.dirname(pkg_dir)
+    cand = os.path.dirname(app)
+    if os.path.basename(app).lower() == "app" and os.path.isfile(os.path.join(cand, "python", "python.exe")):
+        return cand
+    return None
+
+
+def root():
+    """The program's folder: where it is installed (the user picks it in the installer); for a source
+    checkout the default one next to Resolve's user files.  DD_ROOT overrides (tests)."""
+    if os.environ.get("DD_ROOT"):
+        return os.environ["DD_ROOT"]
+    inst = installed_root()
+    if inst:
+        return inst
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        return os.path.join(os.environ["APPDATA"], "Blackmagic Design", "DaVinci Resolve", "Support", "DaVinci Director")
+    return os.path.join(os.path.expanduser("~"), ".davinci_director")
+
+
 def base_dir():
-    d = os.environ.get("DD_HOME") or os.path.join(os.path.expanduser("~"), ".davinci_director")
+    d = os.environ.get("DD_HOME") or os.path.join(root(), "data")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def setup_env():
+    """Point library caches into the program's folder and bring data over from older versions.
+    Call once at start, before importing huggingface_hub / torch / pyannote."""
+    r = root()
+    os.makedirs(r, exist_ok=True)
+    for var, sub in (("HF_HOME", "hf"), ("MPLCONFIGDIR", os.path.join("data", "cache", "matplotlib")),
+                     ("TORCH_HOME", os.path.join("data", "cache", "torch"))):
+        os.environ.setdefault(var, os.path.join(r, sub))
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("PIP_NO_CACHE_DIR", "1")
+    try:
+        migrate_old_locations()
+    except Exception as e:  # never stop the program because of a leftover folder
+        print("Old data not moved: %s" % e)
+
+
+# what earlier versions kept elsewhere, and what is ours in the shared Hugging Face cache
+_OLD_HF = ["models--ihnatov-yuri--parakeet-tdt-0.6b-v3-uk", "models--pyannote--speaker-diarization-community-1"]
+_OBSOLETE = [os.path.join("components", "gpu"),  # CUDA for the former Whisper engine
+             os.path.join("models", "ihnatov-yuri--whisper-large-v3-turbo-uk")]
+
+
+def _move(src, dst):
+    if not os.path.exists(src) or os.path.exists(dst):
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        os.replace(src, dst)  # same drive: instant
+    except OSError:
+        shutil.move(src, dst)
+    return True
+
+
+def migrate_old_locations():
+    """Move data of versions ≤ 2.5 into the program's folder (once; nothing is downloaded again)."""
+    if os.environ.get("DD_ROOT") or os.environ.get("DD_HOME"):
+        return  # tests / custom setups
+    r = root()
+    marker = os.path.join(r, "data", ".migrated")
+    if os.path.exists(marker):
+        return
+    moved = []
+    home = os.path.expanduser("~")
+    if _move(os.path.join(home, ".davinci_director"), os.path.join(r, "data")):
+        moved.append("data")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        old = os.path.join(local, "DaVinciDirector")
+        for rel in _OBSOLETE:  # unused since the switch to Parakeet: not moved, removed
+            shutil.rmtree(os.path.join(old, rel), ignore_errors=True)
+        for sub in ("components", "models", "downloads"):
+            if _move(os.path.join(old, sub), os.path.join(r, sub)):
+                moved.append(sub)
+        try:
+            if os.path.isdir(old) and not os.listdir(old):
+                os.rmdir(old)
+        except OSError:
+            pass
+    hub = os.path.join(os.environ.get("HF_HOME") or os.path.join(r, "hf"), "hub")
+    for name in _OLD_HF:  # models this program downloaded into the shared cache
+        if _move(os.path.join(home, ".cache", "huggingface", "hub", name), os.path.join(hub, name)):
+            moved.append(name)
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("\n".join(moved))
+    if moved:
+        print("Moved into %s: %s" % (r, ", ".join(moved)))
 
 
 def cache_dir(kind):
@@ -47,9 +157,6 @@ def atomic_write(path, text):
 
 
 DEFAULT_SETTINGS = {
-    "anthropic_api_key": "",
-    "claude_model": "claude-opus-5-5",
-    "claude_effort": "high",
     "whisper_model": "large-v3",
     "whisper_device": "auto",
     "whisper_compute_type": "auto",
@@ -57,9 +164,7 @@ DEFAULT_SETTINGS = {
     "diarize": True,
     "hf_token": "",
     "num_speakers": 0,
-    "auto_sync": False,
-    "edit_timeline_suffix": " — DD Edit",
-    "ui_font_size": 13,
+    "use_gpu": True,
 }
 
 
@@ -76,8 +181,6 @@ class Settings:
                 pass
 
     def get(self, key):
-        if key == "anthropic_api_key":
-            return self.data.get(key) or os.environ.get("ANTHROPIC_API_KEY", "")
         if key == "hf_token":
             return self.data.get(key) or os.environ.get("HF_TOKEN", "")
         return self.data.get(key, DEFAULT_SETTINGS.get(key))
@@ -94,8 +197,7 @@ class Settings:
                 pass
 
     def public(self):
-        out = {k: v for k, v in self.data.items() if k not in ("anthropic_api_key", "hf_token")}
-        out["has_api_key"] = bool(self.get("anthropic_api_key"))
+        out = {k: v for k, v in self.data.items() if k != "hf_token"}
         out["has_hf_token"] = bool(self.get("hf_token"))
         return out
 

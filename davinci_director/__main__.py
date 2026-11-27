@@ -15,13 +15,12 @@ import threading
 import time
 import urllib.request
 
-from . import __version__
+from . import PORT, __version__
 from .engine import Engine
 from .link import FileBridgeLink, default_bridge_dir
 from .server import App, make_server
 from .storage import Settings, base_dir
 
-DEFAULT_PORT = 8765
 NO_CONSOLE = 0x08000000  # CREATE_NO_WINDOW
 DETACHED = 0x00000008  # DETACHED_PROCESS
 CLOSED_GRACE = 20  # s without a connected window before the app treats it as closed (a reload is shorter)
@@ -95,7 +94,7 @@ def sync_resolve_script():
 
 def _parse_args(argv):
     ap = argparse.ArgumentParser(prog="davinci_director")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--bridge-dir", default=None)
     ap.add_argument("--no-script-sync", action="store_true", help="do not update the script in Resolve's Scripts folder")
     return ap.parse_args(argv)

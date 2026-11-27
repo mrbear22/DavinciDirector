@@ -16,13 +16,14 @@ import urllib.request
 import venv
 import winreg
 
+from davinci_director import PORT
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 VENV = os.path.join(HERE, ".venv")
 PYW = os.path.join(VENV, "Scripts", "pythonw.exe")
 WATCHER = os.path.join(HERE, "davinci_director_watcher.pyw")
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "DaVinciDirector"
-PORT = 8765
 DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
 

@@ -11,18 +11,19 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def quit_running(port=8765):
+def quit_running():
+    from davinci_director import PORT
     import time
     import urllib.request
     try:
-        req = urllib.request.Request("http://127.0.0.1:%d/api/quit" % port, data=b"{}",
+        req = urllib.request.Request("http://127.0.0.1:%d/api/quit" % PORT, data=b"{}",
                                      headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=2).read()
     except Exception:
         return
     for _ in range(40):
         try:
-            urllib.request.urlopen("http://127.0.0.1:%d/api/ping" % port, timeout=0.5).read()
+            urllib.request.urlopen("http://127.0.0.1:%d/api/ping" % PORT, timeout=0.5).read()
             time.sleep(0.25)
         except Exception:
             return

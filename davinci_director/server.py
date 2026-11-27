@@ -592,7 +592,7 @@ def _disp(name):
     return "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (ascii_name, urllib.parse.quote(name))
 
 
-def make_server(app, host="127.0.0.1", port=8765):
+def make_server(app, port, host="127.0.0.1"):
     handler = type("BoundHandler", (Handler,), {"app": app})
     for p in [port] + list(range(port + 1, port + 20)) + [0]:
         try:

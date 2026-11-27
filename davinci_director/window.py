@@ -3,7 +3,7 @@
 Runs as its own process (pywebview needs the main thread), so the background app
 stays alive when the window is closed:
 
-    pythonw -m davinci_director.window http://127.0.0.1:8765/
+    pythonw -m davinci_director.window http://127.0.0.1:<port>/
 """
 
 import ctypes
@@ -68,4 +68,4 @@ def _closed(url):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8765/"))
+    sys.exit(main(sys.argv[1]))
